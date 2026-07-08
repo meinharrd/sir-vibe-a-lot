@@ -27,11 +27,11 @@ uses this server's existing Claude login, settings, and skills.
    your user ID. Put that in `OWNER_IDS` in `.env` and restart.
 4. Install as a service:
    ```sh
-   sudo cp telegram-claude-bot.service /etc/systemd/system/
+   sudo cp sir-vibe-a-lot.service /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now telegram-claude-bot
+   sudo systemctl enable --now sir-vibe-a-lot
    ```
-   Logs: `journalctl -u telegram-claude-bot -f`
+   Logs: `journalctl -u sir-vibe-a-lot -f`
 
 ## Bot commands
 

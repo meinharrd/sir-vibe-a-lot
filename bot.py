@@ -36,7 +36,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
-HELP = """<b>Claude Code on Telegram</b>
+HELP = """<b>Sir Vibe-a-lot</b> — Claude Code on Telegram
 
 Send any text, voice note, photo, or file — it goes straight to Claude.
 
@@ -303,7 +303,7 @@ async def cmd_restartbot(update: Update, context):
     await update.message.reply_text("♻️ Restarting the bot… back in a few seconds.")
     subprocess.Popen(
         ["sudo", "systemd-run", "--on-active=2",
-         "systemctl", "restart", "telegram-claude-bot"])
+         "systemctl", "restart", "sir-vibe-a-lot"])
 
 
 def _submit(update: Update, prompt, was_voice: bool = False):
