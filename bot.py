@@ -2,6 +2,7 @@
 import asyncio
 import html
 import logging
+import subprocess
 import tempfile
 import time
 import uuid
@@ -47,6 +48,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
 /voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
 /cwd <i>[path]</i> — change Claude's working directory
+/restartbot — restart the bot process (after code changes)
 /help — this message
 
 <b>Claude slash commands</b>
@@ -268,6 +270,13 @@ async def cmd_cwd(update: Update, context):
         f"Working directory set to {p}. Starting a new session there.")
 
 
+async def cmd_restartbot(update: Update, context):
+    await update.message.reply_text("♻️ Restarting the bot… back in a few seconds.")
+    subprocess.Popen(
+        ["sudo", "systemd-run", "--on-active=2",
+         "systemctl", "restart", "telegram-claude-bot"])
+
+
 def _submit(update: Update, prompt, was_voice: bool = False):
     chat_id = update.effective_chat.id
     session = manager.get(chat_id)
@@ -374,6 +383,7 @@ async def post_init(app: Application):
         BotCommand("mode", "tool permissions: ask / auto"),
         BotCommand("voice", "voice replies: off / auto / always"),
         BotCommand("cwd", "change working directory"),
+        BotCommand("restartbot", "restart the bot process"),
         BotCommand("compact", "compact the conversation (Claude)"),
         BotCommand("help", "show help"),
     ])
@@ -400,6 +410,7 @@ def main():
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(CommandHandler("cwd", cmd_cwd))
+    app.add_handler(CommandHandler("restartbot", cmd_restartbot))
     app.add_handler(MessageHandler(filters.COMMAND, on_unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))

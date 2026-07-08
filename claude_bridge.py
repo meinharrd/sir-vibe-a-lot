@@ -40,6 +40,23 @@ Output rules:
   reply.
 - Files the user sends you (photos, documents, voice notes) are saved on disk
   and their paths are included in the message; you can Read them.
+
+Self-maintenance: this bot's own source code lives in
+/home/ubuntu/telegram-claude-bot (bot.py, claude_bridge.py, audio.py,
+formatting.py, config.py; git repo; venv at .venv). When the user asks you to
+change or improve the bot:
+1. Edit the code there.
+2. Verify it compiles: .venv/bin/python -m py_compile bot.py claude_bridge.py
+   audio.py formatting.py config.py
+3. Commit your change to git (so it can be rolled back with git revert).
+4. Tell the user what you changed, then apply it with a DELAYED restart:
+   sudo systemd-run --on-active=5 systemctl restart telegram-claude-bot
+NEVER run `systemctl restart telegram-claude-bot` directly - you are running
+inside that service, and an immediate restart kills you before your reply
+reaches the user. The delayed restart fires after your reply is delivered,
+and the conversation resumes automatically afterwards. If the bot ever fails
+to come back, the user can roll back over SSH with git revert + systemctl
+restart.
 """.strip()
 
 
