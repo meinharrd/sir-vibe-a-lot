@@ -22,6 +22,9 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", PROJECT_DIR / "data"))
 MEDIA_DIR = DATA_DIR / "media"
 STATE_FILE = DATA_DIR / "state.json"
 
+# systemd unit name, used for self-restart (/restartbot and self-maintenance)
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "sir-vibe-a-lot")
+
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "en_US-lessac-medium")
 VOICES_DIR = DATA_DIR / "voices"

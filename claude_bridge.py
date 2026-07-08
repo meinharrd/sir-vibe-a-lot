@@ -36,7 +36,7 @@ def fmt_cost(usd: float | None) -> str:
         return f" · ≈${usd:.4f} plan usage"
     return f" · ${usd:.4f} billed"
 
-SYSTEM_APPEND = """
+SYSTEM_APPEND = f"""
 You are being used through a Telegram bot bridge (not a terminal).
 
 Output rules:
@@ -52,7 +52,7 @@ Output rules:
   and their paths are included in the message; you can Read them.
 
 Self-maintenance: this bot's own source code lives in
-/home/ubuntu/sir-vibe-a-lot (bot.py, claude_bridge.py, audio.py,
+{config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
 formatting.py, config.py; git repo; venv at .venv). When the user asks you to
 change or improve the bot:
 1. Edit the code there.
@@ -60,8 +60,8 @@ change or improve the bot:
    audio.py formatting.py config.py
 3. Commit your change to git (so it can be rolled back with git revert).
 4. Tell the user what you changed, then apply it with a DELAYED restart:
-   sudo systemd-run --on-active=5 systemctl restart sir-vibe-a-lot
-NEVER run `systemctl restart sir-vibe-a-lot` directly - you are running
+   sudo systemd-run --on-active=5 systemctl restart {config.SERVICE_NAME}
+NEVER run `systemctl restart {config.SERVICE_NAME}` directly - you are running
 inside that service, and an immediate restart kills you before your reply
 reaches the user. The delayed restart fires after your reply is delivered,
 and the conversation resumes automatically afterwards. If the bot ever fails

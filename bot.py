@@ -303,7 +303,7 @@ async def cmd_restartbot(update: Update, context):
     await update.message.reply_text("♻️ Restarting the bot… back in a few seconds.")
     subprocess.Popen(
         ["sudo", "systemd-run", "--on-active=2",
-         "systemctl", "restart", "sir-vibe-a-lot"])
+         "systemctl", "restart", config.SERVICE_NAME])
 
 
 def _submit(update: Update, prompt, was_voice: bool = False):
