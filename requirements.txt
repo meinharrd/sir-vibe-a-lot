@@ -1,0 +1,5 @@
+python-telegram-bot~=22.0
+claude-agent-sdk
+faster-whisper
+piper-tts
+python-dotenv

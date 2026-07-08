@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram bridge to Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/telegram-claude-bot
+ExecStart=/home/ubuntu/telegram-claude-bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/home/ubuntu
+
+[Install]
+WantedBy=multi-user.target
