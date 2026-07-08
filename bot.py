@@ -200,12 +200,32 @@ async def cmd_status(update: Update, context):
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
         + (f" · queued: {s.queue.qsize()}" if s.queue.qsize() else ""),
     ]
-    if st.last_cost is not None:
-        lines.append(f"<b>last run</b>: ${st.last_cost:.4f}"
-                     f" · <b>total</b>: ${st.total_cost:.2f}")
+    lines.append(_billing_line(st))
     if st.always_allowed:
         lines.append("<b>always allowed</b>: " + ", ".join(st.always_allowed))
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+def _billing_line(st) -> str:
+    if config.BILLING_MODE == "subscription":
+        plan = (config.SUBSCRIPTION_PLAN or "").title()
+        line = f"<b>billing</b>: Claude {plan} subscription (no per-token charges)"
+    elif config.BILLING_MODE == "api":
+        line = "<b>billing</b>: API key — costs are real charges"
+    else:
+        line = "<b>billing</b>: unknown"
+    if st.last_cost is not None:
+        est = "≈" if config.BILLING_MODE == "subscription" else ""
+        line += (f"\n<b>last run</b>: {est}${st.last_cost:.4f}"
+                 f" · <b>total</b>: {est}${st.total_cost:.2f}")
+        if config.BILLING_MODE == "subscription":
+            line += "\n<i>$ figures are API-equivalent estimates of plan usage, not money spent</i>"
+    return line
+
+
+async def cmd_cost(update: Update, context):
+    st = manager.get(update.effective_chat.id).state
+    await update.message.reply_text(_billing_line(st), parse_mode="HTML")
 
 
 async def cmd_model(update: Update, context):
@@ -379,6 +399,7 @@ async def post_init(app: Application):
         BotCommand("new", "start a fresh session"),
         BotCommand("stop", "interrupt the current run"),
         BotCommand("status", "session info and cost"),
+        BotCommand("cost", "billing mode and usage totals"),
         BotCommand("model", "switch model"),
         BotCommand("mode", "tool permissions: ask / auto"),
         BotCommand("voice", "voice replies: off / auto / always"),
@@ -406,6 +427,7 @@ def main():
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("voice", cmd_voice))

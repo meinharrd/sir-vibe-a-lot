@@ -37,5 +37,29 @@ SAFE_TOOLS = {
 
 PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min
 
+
+def _detect_billing() -> tuple[str, str | None]:
+    """How Claude usage is paid for.
+
+    Returns ("api", None) when a metered API key is set (costs are real
+    charges), ("subscription", "<plan>") for a claude.ai OAuth login (costs
+    are API-equivalent estimates covered by the plan), else ("unknown", None).
+    """
+    import json
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "api", None
+    try:
+        creds = json.loads(
+            (Path.home() / ".claude" / ".credentials.json").read_text())
+        plan = creds.get("claudeAiOauth", {}).get("subscriptionType")
+        if plan:
+            return "subscription", plan
+    except Exception:
+        pass
+    return "unknown", None
+
+
+BILLING_MODE, SUBSCRIPTION_PLAN = _detect_billing()
+
 for d in (DATA_DIR, MEDIA_DIR, VOICES_DIR):
     d.mkdir(parents=True, exist_ok=True)

@@ -26,6 +26,16 @@ import config
 
 log = logging.getLogger(__name__)
 
+
+def fmt_cost(usd: float | None) -> str:
+    """Label costs by billing mode: subscription usage is an estimate (≈),
+    API-key usage is an actual charge ($)."""
+    if usd is None:
+        return ""
+    if config.BILLING_MODE == "subscription":
+        return f" · ≈${usd:.4f} plan usage"
+    return f" · ${usd:.4f} billed"
+
 SYSTEM_APPEND = """
 You are being used through a Telegram bot bridge (not a terminal).
 
@@ -281,8 +291,7 @@ class ChatSession:
                     self.state.total_cost += message.total_cost_usd
                 self._save()
                 elapsed = time.time() - started
-                cost = (f" · ${message.total_cost_usd:.4f}"
-                        if message.total_cost_usd else "")
+                cost = fmt_cost(message.total_cost_usd)
                 if message.subtype == "success":
                     await self.io.status_done(
                         self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
