@@ -194,7 +194,7 @@ async def cmd_status(update: Update, context):
     lines = [
         f"<b>session</b>: <code>{st.session_id or '(none yet)'}</code>",
         f"<b>cwd</b>: <code>{st.cwd}</code>",
-        f"<b>model</b>: {st.model or 'default'}",
+        f"<b>model</b>: {_model_line(st)}",
         f"<b>permissions</b>: {st.mode}",
         f"<b>voice replies</b>: {st.voice}",
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
@@ -204,6 +204,14 @@ async def cmd_status(update: Update, context):
     if st.always_allowed:
         lines.append("<b>always allowed</b>: " + ", ".join(st.always_allowed))
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+def _model_line(st) -> str:
+    if st.active_model:
+        if st.model and st.model.lower() not in st.active_model.lower():
+            return f"{st.active_model} (requested: {st.model})"
+        return st.active_model
+    return st.model or "default (resolves on first message)"
 
 
 def _billing_line(st) -> str:
@@ -233,10 +241,11 @@ async def cmd_model(update: Update, context):
     arg = " ".join(context.args).strip().lower()
     if not arg:
         await update.message.reply_text(
-            f"Current model: {s.state.model or 'default'}\n"
+            f"Current model: {_model_line(s.state)}\n"
             "Usage: /model opus | sonnet | haiku | default | <full-model-id>")
         return
     s.state.model = None if arg == "default" else arg
+    s.state.active_model = None  # re-resolved on the next message
     s.mark_dirty()
     manager.save()
     await update.message.reply_text(f"Model set to {arg}. Applies to the next message.")

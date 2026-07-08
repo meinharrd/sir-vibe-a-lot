@@ -74,7 +74,8 @@ restart.
 class ChatState:
     session_id: str | None = None
     cwd: str = config.DEFAULT_CWD
-    model: str | None = None
+    model: str | None = None        # what the user requested (None = default)
+    active_model: str | None = None  # actual model id reported by the SDK
     mode: str = "ask"           # "ask" | "auto"
     voice: str = "auto"         # "off" | "auto" | "always"
     always_allowed: list[str] = field(default_factory=list)
@@ -271,10 +272,15 @@ class ChatSession:
                     sid = message.data.get("session_id")
                     if sid:
                         self.state.session_id = sid
-                        self._save()
+                    active = message.data.get("model")
+                    if active:
+                        self.state.active_model = active
+                    self._save()
                 elif message.subtype == "compact_boundary":
                     await self.io.status_update(self.chat_id, "🗜 compacted context")
             elif isinstance(message, AssistantMessage):
+                if message.model:
+                    self.state.active_model = message.model
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         collected_text.append(block.text)
