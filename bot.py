@@ -179,6 +179,7 @@ async def cmd_start(update: Update, context):
 async def cmd_new(update: Update, context):
     session = manager.get(update.effective_chat.id)
     await session.reset()
+    await _deactivate_resume_msg(context.bot, update.effective_chat.id)
     await update.message.reply_text("🆕 Fresh session started.")
 
 
@@ -188,6 +189,29 @@ def _fmt_age(seconds: float) -> str:
     if seconds < 86400:
         return f"{int(seconds / 3600)}h ago"
     return f"{int(seconds / 86400)}d ago"
+
+
+def _resume_kb(sid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "⏪ Resume", callback_data=f"r|{sid}")]])
+
+
+# chat_id -> (message_id, session_id, base_text_html) of the listing entry
+# currently marked 🟢 active, so its Resume button can be restored later.
+active_resume_msg: dict[int, tuple[int, str, str]] = {}
+
+
+async def _deactivate_resume_msg(bot, chat_id: int):
+    prev = active_resume_msg.pop(chat_id, None)
+    if prev is None:
+        return
+    msg_id, sid, base = prev
+    try:
+        await bot.edit_message_text(
+            base, chat_id=chat_id, message_id=msg_id,
+            parse_mode="HTML", reply_markup=_resume_kb(sid))
+    except Exception:
+        pass
 
 
 async def cmd_resume(update: Update, context):
@@ -201,17 +225,21 @@ async def cmd_resume(update: Update, context):
             return
         session.resume_choices = [s["id"] for s in sessions]
         now = time.time()
+        chat_id = update.effective_chat.id
+        active_resume_msg.pop(chat_id, None)  # old listing is superseded
         await update.message.reply_text(
             f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:",
             parse_mode="HTML")
         for s in sessions:
-            mark = " ← current" if s["current"] else ""
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                "⏪ Resume", callback_data=f"r|{s['id']}")]])
-            await update.message.reply_text(
-                f"<i>{_fmt_age(now - s['mtime'])}</i>{mark} — "
-                f"{html.escape(s['preview'])}",
-                parse_mode="HTML", reply_markup=kb)
+            base = (f"<i>{_fmt_age(now - s['mtime'])}</i> — "
+                    f"{html.escape(s['preview'])}")
+            if s["current"]:
+                msg = await update.message.reply_text(
+                    f"🟢 {base}", parse_mode="HTML")
+                active_resume_msg[chat_id] = (msg.message_id, s["id"], base)
+            else:
+                await update.message.reply_text(
+                    base, parse_mode="HTML", reply_markup=_resume_kb(s["id"]))
         return
     if session.busy:
         await update.message.reply_text(
@@ -226,6 +254,7 @@ async def cmd_resume(update: Update, context):
             "Give a number from the /resume list, or a full session id.")
         return
     await session.resume(sid)
+    await _deactivate_resume_msg(context.bot, update.effective_chat.id)
     await update.message.reply_text(
         f"⏪ Resumed <code>{html.escape(sid)}</code> — your next message "
         "continues that conversation.", parse_mode="HTML")
@@ -345,6 +374,7 @@ async def cmd_cwd(update: Update, context):
     s.state.session_id = None  # sessions are scoped to the working directory
     s.mark_dirty()
     manager.save()
+    await _deactivate_resume_msg(context.bot, update.effective_chat.id)
     await update.message.reply_text(
         f"Working directory set to {p}. Starting a new session there.")
 
@@ -455,21 +485,21 @@ async def on_perm_button(update: Update, context):
 async def on_resume_button(update: Update, context):
     query = update.callback_query
     sid = query.data.split("|", 1)[1]
-    session = manager.get(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    session = manager.get(chat_id)
     if session.busy:
         await query.answer("A run is in progress — /stop it first.",
                            show_alert=True)
         return
     await session.resume(sid)
-    await query.answer("Resumed")
+    await query.answer("Resumed — your next message continues it.")
+    await _deactivate_resume_msg(context.bot, chat_id)
+    base = query.message.text_html
     try:
-        await query.edit_message_text(
-            query.message.text_html
-            + f"\n\n⏪ Resumed <code>{html.escape(sid)}</code> — your next "
-            "message continues that conversation.",
-            parse_mode="HTML")
+        await query.edit_message_text(f"🟢 {base}", parse_mode="HTML")
     except Exception:
         pass
+    active_resume_msg[chat_id] = (query.message.message_id, sid, base)
 
 
 async def post_init(app: Application):
