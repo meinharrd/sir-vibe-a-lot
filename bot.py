@@ -390,8 +390,7 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
     rows = [nav]
     for i, name in enumerate(subs):
-        rows.append([InlineKeyboardButton(
-            f"📁 {name}", callback_data=f"d|{i}")])
+        rows.append([InlineKeyboardButton(name, callback_data=f"d|{i}")])
     text = (f"📂 <code>{html.escape(str(path))}</code>\n"
             "Tap a folder to browse, ✅ to make it the working directory.")
     return text, InlineKeyboardMarkup(rows)
