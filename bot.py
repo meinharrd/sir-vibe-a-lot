@@ -42,7 +42,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 
 <b>Bot commands</b>
 /new — start a fresh session
-/resume — list &amp; resume earlier sessions
+/resume — resume sessions
 /stop — interrupt the current run
 /status — session info &amp; cost
 /model <i>[opus|sonnet|haiku|default]</i> — switch model
@@ -514,7 +514,7 @@ async def post_init(app: Application):
     io.app = app
     await app.bot.set_my_commands([
         BotCommand("new", "start a fresh session"),
-        BotCommand("resume", "list & resume earlier sessions"),
+        BotCommand("resume", "resume sessions"),
         BotCommand("stop", "interrupt the current run"),
         BotCommand("status", "session info and cost"),
         BotCommand("cost", "billing mode and usage totals"),
