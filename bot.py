@@ -28,7 +28,7 @@ from telegram.ext import (
 
 import audio
 import config
-from claude_bridge import ChatManager, TelegramIO, image_prompt
+from claude_bridge import ChatManager, TelegramIO, image_prompt, _project_dir
 from formatting import md_to_telegram_html, split_message
 
 logging.basicConfig(
@@ -397,7 +397,9 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
             row = []
     if row:
         rows.append(row)
+    n_sessions = len(list(_project_dir(str(path)).glob("*.jsonl")))
     text = (f"📂 <code>{html.escape(str(path))}</code>\n"
+            f"<i>{n_sessions} Claude session{'s' if n_sessions != 1 else ''}</i>\n"
             "Tap a folder to browse, ✅ to make it the working directory.")
     return text, InlineKeyboardMarkup(rows)
 
