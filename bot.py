@@ -368,6 +368,9 @@ async def cmd_voice(update: Update, context):
 # chat_id -> (browse path, listed subdir names) for the /cwd folder browser
 cwd_browse: dict[int, tuple[Path, list[str]]] = {}
 
+# chat_id -> base path awaiting a new-folder name (after the ➕ New button)
+cwd_mkdir_pending: dict[int, Path] = {}
+
 
 # Telegram allows at most 100 buttons per inline keyboard; keep room for the nav row.
 MAX_DIR_BUTTONS = 96
@@ -393,6 +396,7 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton("🟢 Current", callback_data="d|cur"))
     else:
         nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
+    nav.append(InlineKeyboardButton("➕ New", callback_data="d|new"))
     rows = [nav]
     row = []
     for i, name in enumerate(subs):
@@ -455,6 +459,14 @@ async def on_cwd_button(update: Update, context):
         await query.answer()
         await query.edit_message_text(msg)
         return
+    if action == "new":
+        cwd_mkdir_pending[chat_id] = path
+        await query.answer()
+        await context.bot.send_message(
+            chat_id,
+            f"➕ Reply with a name for the new folder in {path}\n"
+            "(send /cancel to abort)")
+        return
     if action == "up":
         path = path.parent
     elif action.isdigit() and int(action) < len(subs):
@@ -487,6 +499,30 @@ def _submit(update: Update, prompt, was_voice: bool = False):
 
 
 async def on_text(update: Update, context):
+    chat_id = update.effective_chat.id
+    if chat_id in cwd_mkdir_pending:
+        text = update.message.text
+        base = cwd_mkdir_pending.pop(chat_id)
+        if text.startswith("/"):
+            if text.split()[0] == "/cancel":
+                await update.message.reply_text("Folder creation cancelled.")
+                return
+            # any other command aborts the prompt and is handled normally
+        else:
+            name = text.strip()
+            if not name or "/" in name or name in (".", ".."):
+                await update.message.reply_text(
+                    f"Invalid folder name: {name!r}. Run /cwd and tap ➕ New to retry.")
+                return
+            new_dir = base / name
+            try:
+                new_dir.mkdir(exist_ok=True)
+            except OSError as e:
+                await update.message.reply_text(f"⚠️ Could not create {new_dir}: {e}")
+                return
+            view_text, kb = _cwd_view(chat_id, new_dir)
+            await update.message.reply_text(view_text, parse_mode="HTML", reply_markup=kb)
+            return
     session, queued = _submit(update, update.message.text)
     if queued > 1 or session.busy:
         await update.message.reply_text(f"⏳ Queued (position {queued}).")
