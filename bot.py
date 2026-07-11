@@ -201,19 +201,17 @@ async def cmd_resume(update: Update, context):
             return
         session.resume_choices = [s["id"] for s in sessions]
         now = time.time()
-        lines = [f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:"]
-        buttons = []
-        for i, s in enumerate(sessions, 1):
-            mark = " ← current" if s["current"] else ""
-            lines.append(f"{i}. <i>{_fmt_age(now - s['mtime'])}</i> — "
-                         f"{html.escape(s['preview'])}{mark}")
-            buttons.append(InlineKeyboardButton(
-                str(i), callback_data=f"r|{s['id']}"))
-        rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
-        lines.append("\nTap a number to resume that session.")
         await update.message.reply_text(
-            "\n".join(lines), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(rows))
+            f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:",
+            parse_mode="HTML")
+        for s in sessions:
+            mark = " ← current" if s["current"] else ""
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⏪ Resume", callback_data=f"r|{s['id']}")]])
+            await update.message.reply_text(
+                f"<i>{_fmt_age(now - s['mtime'])}</i>{mark} — "
+                f"{html.escape(s['preview'])}",
+                parse_mode="HTML", reply_markup=kb)
         return
     if session.busy:
         await update.message.reply_text(
