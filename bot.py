@@ -233,9 +233,14 @@ async def cmd_resume(update: Update, context):
             f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:",
             parse_mode="HTML")
         for s in sessions:
+            details = [_fmt_age(now - s["mtime"])]
+            if s["model"]:
+                details.append(s["model"])
+            details.append(f"{s['ctx_pct']}% ctx")
+            details.append(f"{s['turns']} turn{'s' if s['turns'] != 1 else ''}")
             msg = await update.message.reply_text(
-                f"<i>{_fmt_age(now - s['mtime'])}</i> — "
-                f"{html.escape(s['preview'])}",
+                f"<b>{html.escape(s['title'])}</b>\n"
+                f"<i>{html.escape(' · '.join(details))}</i>",
                 parse_mode="HTML",
                 reply_markup=_resume_kb(s["id"], active=s["current"]))
             if s["current"]:

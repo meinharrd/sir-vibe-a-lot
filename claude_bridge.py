@@ -89,36 +89,62 @@ def _project_dir(cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
-def _session_preview(path: Path) -> str | None:
-    """First real user message of a session transcript, truncated."""
+MAX_CONTEXT_TOKENS = 200_000
+
+
+def _session_meta(path: Path) -> dict | None:
+    """Title, model, context size and turn count from a session transcript.
+
+    Returns None for transcripts with no real user message (e.g. warmups).
+    """
+    title = None
+    preview = None
+    model = None
+    ctx_tokens = 0
+    turns = 0
     try:
         with path.open() as fh:
-            for _ in range(200):
-                line = fh.readline()
-                if not line:
-                    break
+            for line in fh:
                 try:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if rec.get("type") != "user":
-                    continue
-                content = rec.get("message", {}).get("content")
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    text = " ".join(
-                        b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text")
-                else:
-                    continue
-                text = " ".join(text.split())
-                if not text or text.startswith("<"):
-                    continue  # system reminders / command wrappers
-                return text[:200]
+                t = rec.get("type")
+                if t == "ai-title":
+                    title = rec.get("aiTitle") or title
+                elif t == "user":
+                    content = rec.get("message", {}).get("content")
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text")
+                    else:
+                        continue
+                    text = " ".join(text.split())
+                    if not text or text.startswith("<"):
+                        continue  # system reminders / command wrappers
+                    turns += 1
+                    if preview is None:
+                        preview = text[:200]
+                elif t == "assistant":
+                    msg = rec.get("message", {})
+                    model = msg.get("model") or model
+                    usage = msg.get("usage") or {}
+                    tokens = (usage.get("input_tokens", 0)
+                              + usage.get("cache_read_input_tokens", 0)
+                              + usage.get("cache_creation_input_tokens", 0))
+                    if tokens:
+                        ctx_tokens = tokens
     except OSError:
         return None
-    return None
+    if preview is None:
+        return None
+    if model:  # "claude-fable-5" -> "fable-5"
+        model = re.sub(r"^claude-", "", re.sub(r"-\d{8}$", "", model))
+    return {"title": title or preview, "model": model, "turns": turns,
+            "ctx_pct": min(100, round(ctx_tokens * 100 / MAX_CONTEXT_TOKENS))}
 
 
 class TelegramIO:
@@ -264,12 +290,12 @@ class ChatSession:
         out = []
         for f in sorted(pdir.glob("*.jsonl"),
                         key=lambda p: p.stat().st_mtime, reverse=True):
-            preview = _session_preview(f)
-            if preview is None:
+            meta = _session_meta(f)
+            if meta is None:
                 continue
-            out.append({"id": f.stem, "mtime": f.stat().st_mtime,
-                        "preview": preview,
-                        "current": f.stem == self.state.session_id})
+            meta.update(id=f.stem, mtime=f.stat().st_mtime,
+                        current=f.stem == self.state.session_id)
+            out.append(meta)
             if len(out) >= limit:
                 break
         return out
