@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from telegram import (
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -368,8 +369,9 @@ async def cmd_voice(update: Update, context):
 # chat_id -> (browse path, listed subdir names) for the /cwd folder browser
 cwd_browse: dict[int, tuple[Path, list[str]]] = {}
 
-# chat_id -> base path awaiting a new-folder name (after the ➕ New button)
-cwd_mkdir_pending: dict[int, Path] = {}
+# chat_id -> (base path, prompt message_id) awaiting a new-folder name;
+# only a reply to that prompt message is treated as the name
+cwd_mkdir_pending: dict[int, tuple[Path, int]] = {}
 
 
 # Telegram allows at most 100 buttons per inline keyboard; keep room for the nav row.
@@ -460,12 +462,13 @@ async def on_cwd_button(update: Update, context):
         await query.edit_message_text(msg)
         return
     if action == "new":
-        cwd_mkdir_pending[chat_id] = path
         await query.answer()
-        await context.bot.send_message(
+        prompt = await context.bot.send_message(
             chat_id,
-            f"➕ Reply with a name for the new folder in {path}\n"
-            "(send /cancel to abort)")
+            f"➕ Reply to this message with a name for the new folder in {path}\n"
+            "(any other message just cancels this)",
+            reply_markup=ForceReply(input_field_placeholder="folder name"))
+        cwd_mkdir_pending[chat_id] = (path, prompt.message_id)
         return
     if action == "up":
         path = path.parent
@@ -501,15 +504,10 @@ def _submit(update: Update, prompt, was_voice: bool = False):
 async def on_text(update: Update, context):
     chat_id = update.effective_chat.id
     if chat_id in cwd_mkdir_pending:
-        text = update.message.text
-        base = cwd_mkdir_pending.pop(chat_id)
-        if text.startswith("/"):
-            if text.split()[0] == "/cancel":
-                await update.message.reply_text("Folder creation cancelled.")
-                return
-            # any other command aborts the prompt and is handled normally
-        else:
-            name = text.strip()
+        base, prompt_id = cwd_mkdir_pending.pop(chat_id)
+        reply_to = update.message.reply_to_message
+        if reply_to is not None and reply_to.message_id == prompt_id:
+            name = update.message.text.strip()
             if not name or "/" in name or name in (".", ".."):
                 await update.message.reply_text(
                     f"Invalid folder name: {name!r}. Run /cwd and tap ➕ New to retry.")
@@ -523,6 +521,7 @@ async def on_text(update: Update, context):
             view_text, kb = _cwd_view(chat_id, new_dir)
             await update.message.reply_text(view_text, parse_mode="HTML", reply_markup=kb)
             return
+        # any non-reply message cancels the prompt and is handled normally
     session, queued = _submit(update, update.message.text)
     if queued > 1 or session.busy:
         await update.message.reply_text(f"⏳ Queued (position {queued}).")
