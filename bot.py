@@ -369,9 +369,20 @@ async def cmd_voice(update: Update, context):
 # chat_id -> (browse path, listed subdir names) for the /cwd folder browser
 cwd_browse: dict[int, tuple[Path, list[str]]] = {}
 
-# chat_id -> (base path, prompt message_id) awaiting a new-folder name;
-# only a reply to that prompt message is treated as the name
-cwd_mkdir_pending: dict[int, tuple[Path, int]] = {}
+# chat_id -> (base path, prompt message_id, browse message_id) awaiting a
+# new-folder name; only a reply to that prompt message is treated as the name
+cwd_mkdir_pending: dict[int, tuple[Path, int, int]] = {}
+
+
+async def _restore_browse_kb(chat_id: int, bot, base: Path, browse_id: int) -> None:
+    """Turn the browse message's ❌ Cancel back into ➕ New."""
+    try:
+        _, kb = _cwd_view(chat_id, base)
+        await bot.edit_message_reply_markup(chat_id=chat_id,
+                                            message_id=browse_id,
+                                            reply_markup=kb)
+    except Exception:
+        pass
 
 
 async def _cancel_mkdir_prompt(chat_id: int, bot) -> None:
@@ -379,12 +390,13 @@ async def _cancel_mkdir_prompt(chat_id: int, bot) -> None:
     entry = cwd_mkdir_pending.pop(chat_id, None)
     if entry is None:
         return
-    _, prompt_id = entry
+    base, prompt_id, browse_id = entry
     try:
         await bot.edit_message_text("❌ Folder creation cancelled.",
                                     chat_id=chat_id, message_id=prompt_id)
     except Exception:
         pass
+    await _restore_browse_kb(chat_id, bot, base, browse_id)
 
 
 # Telegram allows at most 100 buttons per inline keyboard; keep room for the nav row.
@@ -399,7 +411,8 @@ def _list_subdirs(path: Path) -> list[str]:
         return []
 
 
-def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
+def _cwd_view(chat_id: int, path: Path,
+              pending: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     s = manager.get(chat_id)
     all_subs = _list_subdirs(path)
     subs = all_subs[:MAX_DIR_BUTTONS]
@@ -411,7 +424,10 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton("🟢 Current", callback_data="d|cur"))
     else:
         nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
-    nav.append(InlineKeyboardButton("➕ New", callback_data="d|new"))
+    if pending:
+        nav.append(InlineKeyboardButton("❌ Cancel", callback_data="d|xnew"))
+    else:
+        nav.append(InlineKeyboardButton("➕ New", callback_data="d|new"))
     rows = [nav]
     row = []
     for i, name in enumerate(subs):
@@ -494,7 +510,14 @@ async def on_cwd_button(update: Update, context):
                 [[InlineKeyboardButton("❌ Cancel", callback_data="d|xnew")]]))
         except Exception:
             pass
-        cwd_mkdir_pending[chat_id] = (path, prompt.message_id)
+        cwd_mkdir_pending[chat_id] = (path, prompt.message_id,
+                                      query.message.message_id)
+        # turn the browse message's ➕ New into ❌ Cancel while pending
+        try:
+            _, kb = _cwd_view(chat_id, path, pending=True)
+            await query.edit_message_reply_markup(kb)
+        except Exception:
+            pass
         return
     if action == "up":
         path = path.parent
@@ -530,7 +553,7 @@ def _submit(update: Update, prompt, was_voice: bool = False):
 async def on_text(update: Update, context):
     chat_id = update.effective_chat.id
     if chat_id in cwd_mkdir_pending:
-        base, prompt_id = cwd_mkdir_pending[chat_id]
+        base, prompt_id, browse_id = cwd_mkdir_pending[chat_id]
         reply_to = update.message.reply_to_message
         if reply_to is not None and reply_to.message_id == prompt_id:
             cwd_mkdir_pending.pop(chat_id, None)
@@ -538,6 +561,7 @@ async def on_text(update: Update, context):
                 await reply_to.edit_reply_markup(None)
             except Exception:
                 pass
+            await _restore_browse_kb(chat_id, context.bot, base, browse_id)
             name = update.message.text.strip()
             if not name or "/" in name or name in (".", ".."):
                 await update.message.reply_text(
