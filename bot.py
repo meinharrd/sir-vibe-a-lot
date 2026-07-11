@@ -12,12 +12,8 @@ from telegram import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
     BotCommand,
-    WebAppInfo,
 )
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -54,7 +50,6 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
 /voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
 /cwd <i>[path]</i> — browse &amp; change Claude's working directory
-/miniapp — open the HTML Mini App demo
 /restartbot — restart the bot process (after code changes)
 /help — this message
 
@@ -543,26 +538,6 @@ async def on_cwd_button(update: Update, context):
         pass
 
 
-MINI_APP_URL = "https://vibing.at/tg-mini-app/"
-
-
-async def cmd_miniapp(update: Update, context):
-    kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("🧪 Open Mini App", web_app=WebAppInfo(MINI_APP_URL))]],
-        resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text(
-        "Tap the button below to open the Mini App "
-        f"({MINI_APP_URL}).\nWhatever you submit there comes back to the bot.",
-        reply_markup=kb)
-
-
-async def on_webapp_data(update: Update, context):
-    data = update.effective_message.web_app_data.data
-    await update.message.reply_text(
-        f"📨 Mini App sent: <code>{html.escape(data)}</code>",
-        parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-
-
 async def cmd_restartbot(update: Update, context):
     await update.message.reply_text("♻️ Restarting the bot… back in a few seconds.")
     subprocess.Popen(
@@ -731,7 +706,6 @@ async def post_init(app: Application):
         BotCommand("mode", "tool permissions: ask / auto"),
         BotCommand("voice", "voice replies: off / auto / always"),
         BotCommand("cwd", "change working directory"),
-        BotCommand("miniapp", "open the HTML Mini App demo"),
         BotCommand("restartbot", "restart the bot process"),
         BotCommand("compact", "compact the conversation (Claude)"),
         BotCommand("help", "show help"),
@@ -764,9 +738,7 @@ def main():
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(CommandHandler("cwd", cmd_cwd))
-    app.add_handler(CommandHandler("miniapp", cmd_miniapp))
     app.add_handler(CommandHandler("restartbot", cmd_restartbot))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp_data))
     app.add_handler(MessageHandler(filters.COMMAND, on_unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
