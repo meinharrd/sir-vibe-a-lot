@@ -377,10 +377,11 @@ def _list_subdirs(path: Path) -> list[str]:
         return []
 
 
-def _pad_left(label: str, width: int = 38) -> str:
-    # Telegram centers button text; pad with non-breaking spaces so
-    # folder names line up along the left edge.
-    return label + " " * max(0, width - len(label))
+def _pad_left(label: str, width: int = 30) -> str:
+    # Telegram centers button text and strips trailing whitespace (even
+    # NBSP). Braille blanks (U+2800) are not whitespace, so they survive
+    # and push folder names to the left edge.
+    return label + "⠀" * max(0, width - len(label))
 
 
 def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
