@@ -191,25 +191,27 @@ def _fmt_age(seconds: float) -> str:
     return f"{int(seconds / 86400)}d ago"
 
 
-def _resume_kb(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(
-        "⏪ Resume", callback_data=f"r|{sid}")]])
+def _resume_kb(sid: str, active: bool = False) -> InlineKeyboardMarkup:
+    if active:
+        btn = InlineKeyboardButton("🟢 Active", callback_data=f"ra|{sid}")
+    else:
+        btn = InlineKeyboardButton("⏪ Resume", callback_data=f"r|{sid}")
+    return InlineKeyboardMarkup([[btn]])
 
 
-# chat_id -> (message_id, session_id, base_text_html) of the listing entry
-# currently marked 🟢 active, so its Resume button can be restored later.
-active_resume_msg: dict[int, tuple[int, str, str]] = {}
+# chat_id -> (message_id, session_id) of the listing entry currently showing
+# the 🟢 Active button, so it can be flipped back to ⏪ Resume later.
+active_resume_msg: dict[int, tuple[int, str]] = {}
 
 
 async def _deactivate_resume_msg(bot, chat_id: int):
     prev = active_resume_msg.pop(chat_id, None)
     if prev is None:
         return
-    msg_id, sid, base = prev
+    msg_id, sid = prev
     try:
-        await bot.edit_message_text(
-            base, chat_id=chat_id, message_id=msg_id,
-            parse_mode="HTML", reply_markup=_resume_kb(sid))
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=msg_id, reply_markup=_resume_kb(sid))
     except Exception:
         pass
 
@@ -231,15 +233,13 @@ async def cmd_resume(update: Update, context):
             f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:",
             parse_mode="HTML")
         for s in sessions:
-            base = (f"<i>{_fmt_age(now - s['mtime'])}</i> — "
-                    f"{html.escape(s['preview'])}")
+            msg = await update.message.reply_text(
+                f"<i>{_fmt_age(now - s['mtime'])}</i> — "
+                f"{html.escape(s['preview'])}",
+                parse_mode="HTML",
+                reply_markup=_resume_kb(s["id"], active=s["current"]))
             if s["current"]:
-                msg = await update.message.reply_text(
-                    f"🟢 {base}", parse_mode="HTML")
-                active_resume_msg[chat_id] = (msg.message_id, s["id"], base)
-            else:
-                await update.message.reply_text(
-                    base, parse_mode="HTML", reply_markup=_resume_kb(s["id"]))
+                active_resume_msg[chat_id] = (msg.message_id, s["id"])
         return
     if session.busy:
         await update.message.reply_text(
@@ -494,12 +494,15 @@ async def on_resume_button(update: Update, context):
     await session.resume(sid)
     await query.answer("Resumed — your next message continues it.")
     await _deactivate_resume_msg(context.bot, chat_id)
-    base = query.message.text_html
     try:
-        await query.edit_message_text(f"🟢 {base}", parse_mode="HTML")
+        await query.edit_message_reply_markup(_resume_kb(sid, active=True))
     except Exception:
         pass
-    active_resume_msg[chat_id] = (query.message.message_id, sid, base)
+    active_resume_msg[chat_id] = (query.message.message_id, sid)
+
+
+async def on_active_button(update: Update, context):
+    await update.callback_query.answer("This session is already active.")
 
 
 async def post_init(app: Application):
@@ -533,6 +536,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(on_perm_button, pattern=r"^p\|"))
     app.add_handler(CallbackQueryHandler(on_resume_button, pattern=r"^r\|"))
+    app.add_handler(CallbackQueryHandler(on_active_button, pattern=r"^ra\|"))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
