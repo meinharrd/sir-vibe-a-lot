@@ -377,22 +377,27 @@ def _list_subdirs(path: Path) -> list[str]:
         return []
 
 
+def _pad_left(label: str, width: int = 38) -> str:
+    # Telegram centers button text; pad with non-breaking spaces so
+    # folder names line up along the left edge.
+    return label + " " * max(0, width - len(label))
+
+
 def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
+    s = manager.get(chat_id)
     subs = _list_subdirs(path)
     cwd_browse[chat_id] = (path, subs)
-    rows, row = [], []
-    for i, name in enumerate(subs):
-        row.append(InlineKeyboardButton(f"📁 {name}", callback_data=f"d|{i}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
     nav = []
     if path.parent != path:
         nav.append(InlineKeyboardButton("⬆️ ..", callback_data="d|up"))
-    nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
-    rows.append(nav)
+    if str(path) == s.state.cwd:
+        nav.append(InlineKeyboardButton("🟢 Current", callback_data="d|cur"))
+    else:
+        nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
+    rows = [nav]
+    for i, name in enumerate(subs):
+        rows.append([InlineKeyboardButton(
+            _pad_left(f"📁 {name}"), callback_data=f"d|{i}")])
     text = (f"📂 <code>{html.escape(str(path))}</code>\n"
             "Tap a folder to browse, ✅ to make it the working directory.")
     return text, InlineKeyboardMarkup(rows)
@@ -432,6 +437,9 @@ async def on_cwd_button(update: Update, context):
         await query.answer("Expired — run /cwd again.", show_alert=True)
         return
     path, subs = entry
+    if action == "cur":
+        await query.answer("This is already the working directory.")
+        return
     if action == "set":
         cwd_browse.pop(chat_id, None)
         msg = await _set_cwd(chat_id, context.bot, path)
