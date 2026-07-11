@@ -392,10 +392,14 @@ async def _cancel_mkdir_prompt(chat_id: int, bot) -> None:
         return
     base, prompt_id, browse_id = entry
     try:
-        await bot.edit_message_text("❌ Folder creation cancelled.",
-                                    chat_id=chat_id, message_id=prompt_id)
+        await bot.delete_message(chat_id=chat_id, message_id=prompt_id)
     except Exception:
-        pass
+        # deletion can fail (e.g. message too old) — fall back to editing
+        try:
+            await bot.edit_message_text("❌ Folder creation cancelled.",
+                                        chat_id=chat_id, message_id=prompt_id)
+        except Exception:
+            pass
     await _restore_browse_kb(chat_id, bot, base, browse_id)
 
 
