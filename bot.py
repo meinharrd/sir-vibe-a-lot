@@ -377,13 +377,6 @@ def _list_subdirs(path: Path) -> list[str]:
         return []
 
 
-def _pad_left(label: str, width: int = 30) -> str:
-    # Telegram centers button text and strips trailing whitespace (even
-    # NBSP). Braille blanks (U+2800) are not whitespace, so they survive
-    # and push folder names to the left edge.
-    return label + "⠀" * max(0, width - len(label))
-
-
 def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
     s = manager.get(chat_id)
     subs = _list_subdirs(path)
@@ -398,7 +391,7 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
     rows = [nav]
     for i, name in enumerate(subs):
         rows.append([InlineKeyboardButton(
-            _pad_left(f"📁 {name}"), callback_data=f"d|{i}")])
+            f"📁 {name}", callback_data=f"d|{i}")])
     text = (f"📂 <code>{html.escape(str(path))}</code>\n"
             "Tap a folder to browse, ✅ to make it the working directory.")
     return text, InlineKeyboardMarkup(rows)
