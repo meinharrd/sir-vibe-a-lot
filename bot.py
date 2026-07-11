@@ -202,12 +202,18 @@ async def cmd_resume(update: Update, context):
         session.resume_choices = [s["id"] for s in sessions]
         now = time.time()
         lines = [f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:"]
+        buttons = []
         for i, s in enumerate(sessions, 1):
             mark = " ← current" if s["current"] else ""
             lines.append(f"{i}. <i>{_fmt_age(now - s['mtime'])}</i> — "
                          f"{html.escape(s['preview'])}{mark}")
-        lines.append("\nResume one with /resume <i>number</i>")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            label = f"{i}. {_fmt_age(now - s['mtime'])} — {s['preview']}"[:60]
+            buttons.append([InlineKeyboardButton(
+                label, callback_data=f"r|{s['id']}")])
+        lines.append("\nTap a session to resume it.")
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons))
         return
     if session.busy:
         await update.message.reply_text(
@@ -448,6 +454,26 @@ async def on_perm_button(update: Update, context):
     await query.answer()
 
 
+async def on_resume_button(update: Update, context):
+    query = update.callback_query
+    sid = query.data.split("|", 1)[1]
+    session = manager.get(update.effective_chat.id)
+    if session.busy:
+        await query.answer("A run is in progress — /stop it first.",
+                           show_alert=True)
+        return
+    await session.resume(sid)
+    await query.answer("Resumed")
+    try:
+        await query.edit_message_text(
+            query.message.text_html
+            + f"\n\n⏪ Resumed <code>{html.escape(sid)}</code> — your next "
+            "message continues that conversation.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+
 async def post_init(app: Application):
     io.app = app
     await app.bot.set_my_commands([
@@ -478,6 +504,7 @@ def main():
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
 
     app.add_handler(CallbackQueryHandler(on_perm_button, pattern=r"^p\|"))
+    app.add_handler(CallbackQueryHandler(on_resume_button, pattern=r"^r\|"))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
