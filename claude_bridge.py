@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,43 @@ class ChatState:
     total_cost: float = 0.0
 
 
+def _project_dir(cwd: str) -> Path:
+    """Claude Code's transcript directory for a working directory."""
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def _session_preview(path: Path) -> str | None:
+    """First real user message of a session transcript, truncated."""
+    try:
+        with path.open() as fh:
+            for _ in range(200):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") != "user":
+                    continue
+                content = rec.get("message", {}).get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text")
+                else:
+                    continue
+                text = " ".join(text.split())
+                if not text or text.startswith("<"):
+                    continue  # system reminders / command wrappers
+                return text[:80]
+    except OSError:
+        return None
+    return None
+
+
 class TelegramIO:
     """Implemented by bot.py — everything the bridge needs from Telegram."""
     async def send_text(self, chat_id: int, text: str, markdown: bool = True): ...
@@ -107,6 +145,7 @@ class ChatSession:
         self.worker: asyncio.Task | None = None
         self.busy = False
         self._needs_reconnect = False
+        self.resume_choices: list[str] = []  # ids from the last /resume listing
 
     # ---------- MCP tools Claude can call to reach the user ----------
 
@@ -217,6 +256,28 @@ class ChatSession:
         """/new — forget the session and start fresh."""
         await self._disconnect()
         self.state.session_id = None
+        self._save()
+
+    def list_sessions(self, limit: int = 8) -> list[dict]:
+        """Recent Claude sessions for this chat's cwd, newest first."""
+        pdir = _project_dir(self.state.cwd)
+        out = []
+        for f in sorted(pdir.glob("*.jsonl"),
+                        key=lambda p: p.stat().st_mtime, reverse=True):
+            preview = _session_preview(f)
+            if preview is None:
+                continue
+            out.append({"id": f.stem, "mtime": f.stat().st_mtime,
+                        "preview": preview,
+                        "current": f.stem == self.state.session_id})
+            if len(out) >= limit:
+                break
+        return out
+
+    async def resume(self, session_id: str):
+        """/resume — continue an earlier session of this cwd."""
+        await self._disconnect()
+        self.state.session_id = session_id
         self._save()
 
     async def interrupt(self):

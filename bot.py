@@ -42,6 +42,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 
 <b>Bot commands</b>
 /new — start a fresh session
+/resume — list &amp; resume earlier sessions
 /stop — interrupt the current run
 /status — session info &amp; cost
 /model <i>[opus|sonnet|haiku|default]</i> — switch model
@@ -179,6 +180,51 @@ async def cmd_new(update: Update, context):
     session = manager.get(update.effective_chat.id)
     await session.reset()
     await update.message.reply_text("🆕 Fresh session started.")
+
+
+def _fmt_age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{max(1, int(seconds / 60))}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
+async def cmd_resume(update: Update, context):
+    session = manager.get(update.effective_chat.id)
+    arg = " ".join(context.args).strip() if context.args else ""
+    if not arg:
+        sessions = session.list_sessions()
+        if not sessions:
+            await update.message.reply_text(
+                "No previous sessions found for this directory.")
+            return
+        session.resume_choices = [s["id"] for s in sessions]
+        now = time.time()
+        lines = [f"<b>Recent sessions</b> in <code>{html.escape(session.state.cwd)}</code>:"]
+        for i, s in enumerate(sessions, 1):
+            mark = " ← current" if s["current"] else ""
+            lines.append(f"{i}. <i>{_fmt_age(now - s['mtime'])}</i> — "
+                         f"{html.escape(s['preview'])}{mark}")
+        lines.append("\nResume one with /resume <i>number</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+    if session.busy:
+        await update.message.reply_text(
+            "A run is in progress — /stop it first, then /resume.")
+        return
+    if arg.isdigit() and 1 <= int(arg) <= len(session.resume_choices):
+        sid = session.resume_choices[int(arg) - 1]
+    elif len(arg) >= 8 and all(c in "0123456789abcdefABCDEF-" for c in arg):
+        sid = arg
+    else:
+        await update.message.reply_text(
+            "Give a number from the /resume list, or a full session id.")
+        return
+    await session.resume(sid)
+    await update.message.reply_text(
+        f"⏪ Resumed <code>{html.escape(sid)}</code> — your next message "
+        "continues that conversation.", parse_mode="HTML")
 
 
 async def cmd_stop(update: Update, context):
@@ -406,6 +452,7 @@ async def post_init(app: Application):
     io.app = app
     await app.bot.set_my_commands([
         BotCommand("new", "start a fresh session"),
+        BotCommand("resume", "list & resume earlier sessions"),
         BotCommand("stop", "interrupt the current run"),
         BotCommand("status", "session info and cost"),
         BotCommand("cost", "billing mode and usage totals"),
@@ -434,6 +481,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("cost", cmd_cost))
