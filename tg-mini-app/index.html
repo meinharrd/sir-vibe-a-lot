@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Sir Vibe-a-lot Mini App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body {
+    background: var(--tg-theme-bg-color, #fff);
+    color: var(--tg-theme-text-color, #000);
+    font-family: -apple-system, system-ui, sans-serif;
+    margin: 0;
+    padding: 20px;
+  }
+  h2 { margin-top: 0; }
+  .hint { color: var(--tg-theme-hint-color, #888); font-size: 14px; }
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 12px 0;
+    padding: 12px;
+    font-size: 16px;
+    border: 1px solid var(--tg-theme-hint-color, #ccc);
+    border-radius: 10px;
+    background: var(--tg-theme-secondary-bg-color, #f4f4f4);
+    color: var(--tg-theme-text-color, #000);
+    outline: none;
+  }
+  input:focus { border-color: var(--tg-theme-button-color, #40a7e3); }
+  table { border-collapse: collapse; font-size: 14px; width: 100%; }
+  td { padding: 4px 8px 4px 0; vertical-align: top; }
+  td:first-child { color: var(--tg-theme-hint-color, #888); white-space: nowrap; }
+</style>
+</head>
+<body>
+  <h2>👋 Hello from a Mini App</h2>
+  <p class="hint">This page is plain HTML served from vibing.at, running inside
+  Telegram's webview. It adapts to your Telegram theme automatically.</p>
+
+  <input id="msg" placeholder="type something for the bot…" autofocus>
+
+  <table id="info"></table>
+
+  <script>
+    const tg = Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    const user = tg.initDataUnsafe.user || {};
+    const rows = {
+      "user": [user.first_name, user.last_name].filter(Boolean).join(" ") || "(unknown)",
+      "platform": tg.platform,
+      "color scheme": tg.colorScheme,
+      "Bot API": tg.version,
+      "viewport": Math.round(tg.viewportHeight) + " px",
+    };
+    document.getElementById("info").innerHTML = Object.entries(rows)
+      .map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+
+    const input = document.getElementById("msg");
+    const btn = tg.MainButton;
+    btn.setText("📨 Send to bot");
+    input.addEventListener("input", () => {
+      if (input.value.trim()) btn.show(); else btn.hide();
+    });
+    btn.onClick(() => {
+      tg.HapticFeedback.impactOccurred("medium");
+      // Delivers the string to the bot as a web_app_data service message
+      // and closes the Mini App. Only works when launched from a keyboard button.
+      tg.sendData(input.value.trim());
+    });
+  </script>
+</body>
+</html>
