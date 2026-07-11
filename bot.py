@@ -48,7 +48,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /model <i>[opus|sonnet|haiku|default]</i> — switch model
 /mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
 /voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
-/cwd <i>[path]</i> — change Claude's working directory
+/cwd <i>[path]</i> — browse &amp; change Claude's working directory
 /restartbot — restart the bot process (after code changes)
 /help — this message
 
@@ -365,23 +365,92 @@ async def cmd_voice(update: Update, context):
     await update.message.reply_text(f"Voice replies: {arg}")
 
 
+# chat_id -> (browse path, listed subdir names) for the /cwd folder browser
+cwd_browse: dict[int, tuple[Path, list[str]]] = {}
+
+
+def _list_subdirs(path: Path) -> list[str]:
+    try:
+        return sorted(d.name for d in path.iterdir()
+                      if d.is_dir() and not d.name.startswith("."))[:30]
+    except OSError:
+        return []
+
+
+def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
+    subs = _list_subdirs(path)
+    cwd_browse[chat_id] = (path, subs)
+    rows, row = [], []
+    for i, name in enumerate(subs):
+        row.append(InlineKeyboardButton(f"📁 {name}", callback_data=f"d|{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if path.parent != path:
+        nav.append(InlineKeyboardButton("⬆️ ..", callback_data="d|up"))
+    nav.append(InlineKeyboardButton("✅ Change here", callback_data="d|set"))
+    rows.append(nav)
+    text = (f"📂 <code>{html.escape(str(path))}</code>\n"
+            "Tap a folder to browse, ✅ to make it the working directory.")
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _set_cwd(chat_id: int, bot, path: Path) -> str:
+    s = manager.get(chat_id)
+    s.state.cwd = str(path)
+    s.state.session_id = None  # sessions are scoped to the working directory
+    s.mark_dirty()
+    manager.save()
+    await _deactivate_resume_msg(bot, chat_id)
+    return f"Working directory set to {path}. Starting a new session there."
+
+
 async def cmd_cwd(update: Update, context):
-    s = manager.get(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    s = manager.get(chat_id)
     arg = " ".join(context.args).strip()
     if not arg:
-        await update.message.reply_text(f"Current cwd: {s.state.cwd}")
+        text, kb = _cwd_view(chat_id, Path(s.state.cwd))
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
         return
     p = Path(arg).expanduser()
     if not p.is_dir():
         await update.message.reply_text(f"Not a directory: {p}")
         return
-    s.state.cwd = str(p)
-    s.state.session_id = None  # sessions are scoped to the working directory
-    s.mark_dirty()
-    manager.save()
-    await _deactivate_resume_msg(context.bot, update.effective_chat.id)
-    await update.message.reply_text(
-        f"Working directory set to {p}. Starting a new session there.")
+    await update.message.reply_text(await _set_cwd(chat_id, context.bot, p))
+
+
+async def on_cwd_button(update: Update, context):
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    action = query.data.split("|", 1)[1]
+    entry = cwd_browse.get(chat_id)
+    if entry is None:
+        await query.answer("Expired — run /cwd again.", show_alert=True)
+        return
+    path, subs = entry
+    if action == "set":
+        cwd_browse.pop(chat_id, None)
+        msg = await _set_cwd(chat_id, context.bot, path)
+        await query.answer()
+        await query.edit_message_text(msg)
+        return
+    if action == "up":
+        path = path.parent
+    elif action.isdigit() and int(action) < len(subs):
+        path = path / subs[int(action)]
+    else:
+        await query.answer("Expired — run /cwd again.", show_alert=True)
+        return
+    text, kb = _cwd_view(chat_id, path)
+    await query.answer()
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
 
 
 async def cmd_restartbot(update: Update, context):
@@ -542,6 +611,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_perm_button, pattern=r"^p\|"))
     app.add_handler(CallbackQueryHandler(on_resume_button, pattern=r"^r\|"))
     app.add_handler(CallbackQueryHandler(on_active_button, pattern=r"^ra\|"))
+    app.add_handler(CallbackQueryHandler(on_cwd_button, pattern=r"^d\|"))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
