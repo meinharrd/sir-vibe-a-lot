@@ -207,12 +207,13 @@ async def cmd_resume(update: Update, context):
             mark = " ← current" if s["current"] else ""
             lines.append(f"{i}. <i>{_fmt_age(now - s['mtime'])}</i> — "
                          f"{html.escape(s['preview'])}{mark}")
-            buttons.append([InlineKeyboardButton(
-                f"{i}. {s['preview']}", callback_data=f"r|{s['id']}")])
-        lines.append("\nTap a session to resume it.")
+            buttons.append(InlineKeyboardButton(
+                str(i), callback_data=f"r|{s['id']}"))
+        rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+        lines.append("\nTap a number to resume that session.")
         await update.message.reply_text(
             "\n".join(lines), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons))
+            reply_markup=InlineKeyboardMarkup(rows))
         return
     if session.busy:
         await update.message.reply_text(
