@@ -207,9 +207,8 @@ async def cmd_resume(update: Update, context):
             mark = " ← current" if s["current"] else ""
             lines.append(f"{i}. <i>{_fmt_age(now - s['mtime'])}</i> — "
                          f"{html.escape(s['preview'])}{mark}")
-            label = f"{i}. {_fmt_age(now - s['mtime'])} — {s['preview']}"[:60]
             buttons.append([InlineKeyboardButton(
-                label, callback_data=f"r|{s['id']}")])
+                f"{i}. {s['preview']}", callback_data=f"r|{s['id']}")])
         lines.append("\nTap a session to resume it.")
         await update.message.reply_text(
             "\n".join(lines), parse_mode="HTML",

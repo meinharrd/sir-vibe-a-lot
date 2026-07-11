@@ -115,7 +115,7 @@ def _session_preview(path: Path) -> str | None:
                 text = " ".join(text.split())
                 if not text or text.startswith("<"):
                     continue  # system reminders / command wrappers
-                return text[:80]
+                return text[:200]
     except OSError:
         return None
     return None
