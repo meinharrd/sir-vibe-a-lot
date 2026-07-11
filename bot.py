@@ -374,6 +374,19 @@ cwd_browse: dict[int, tuple[Path, list[str]]] = {}
 cwd_mkdir_pending: dict[int, tuple[Path, int]] = {}
 
 
+async def _cancel_mkdir_prompt(chat_id: int, bot) -> None:
+    """Dismiss a pending new-folder prompt, if any."""
+    entry = cwd_mkdir_pending.pop(chat_id, None)
+    if entry is None:
+        return
+    _, prompt_id = entry
+    try:
+        await bot.edit_message_text("❌ Folder creation cancelled.",
+                                    chat_id=chat_id, message_id=prompt_id)
+    except Exception:
+        pass
+
+
 # Telegram allows at most 100 buttons per inline keyboard; keep room for the nav row.
 MAX_DIR_BUTTONS = 96
 
@@ -447,6 +460,12 @@ async def on_cwd_button(update: Update, context):
     query = update.callback_query
     chat_id = update.effective_chat.id
     action = query.data.split("|", 1)[1]
+    if action == "xnew":
+        await query.answer("Cancelled.")
+        await _cancel_mkdir_prompt(chat_id, context.bot)
+        return
+    # any other button press dismisses a pending new-folder prompt
+    await _cancel_mkdir_prompt(chat_id, context.bot)
     entry = cwd_browse.get(chat_id)
     if entry is None:
         await query.answer("Expired — run /cwd again.", show_alert=True)
@@ -466,8 +485,15 @@ async def on_cwd_button(update: Update, context):
         prompt = await context.bot.send_message(
             chat_id,
             f"➕ Reply to this message with a name for the new folder in {path}\n"
-            "(any other message just cancels this)",
+            "(any other message or button cancels this)",
             reply_markup=ForceReply(input_field_placeholder="folder name"))
+        # ForceReply and inline keyboards can't be combined at send time,
+        # so edit the cancel button in afterwards.
+        try:
+            await prompt.edit_reply_markup(InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Cancel", callback_data="d|xnew")]]))
+        except Exception:
+            pass
         cwd_mkdir_pending[chat_id] = (path, prompt.message_id)
         return
     if action == "up":
@@ -504,9 +530,14 @@ def _submit(update: Update, prompt, was_voice: bool = False):
 async def on_text(update: Update, context):
     chat_id = update.effective_chat.id
     if chat_id in cwd_mkdir_pending:
-        base, prompt_id = cwd_mkdir_pending.pop(chat_id)
+        base, prompt_id = cwd_mkdir_pending[chat_id]
         reply_to = update.message.reply_to_message
         if reply_to is not None and reply_to.message_id == prompt_id:
+            cwd_mkdir_pending.pop(chat_id, None)
+            try:
+                await reply_to.edit_reply_markup(None)
+            except Exception:
+                pass
             name = update.message.text.strip()
             if not name or "/" in name or name in (".", ".."):
                 await update.message.reply_text(
@@ -522,6 +553,7 @@ async def on_text(update: Update, context):
             await update.message.reply_text(view_text, parse_mode="HTML", reply_markup=kb)
             return
         # any non-reply message cancels the prompt and is handled normally
+        await _cancel_mkdir_prompt(chat_id, context.bot)
     session, queued = _submit(update, update.message.text)
     if queued > 1 or session.busy:
         await update.message.reply_text(f"⏳ Queued (position {queued}).")
@@ -583,6 +615,7 @@ async def on_document(update: Update, context):
 
 async def on_perm_button(update: Update, context):
     query = update.callback_query
+    await _cancel_mkdir_prompt(update.effective_chat.id, context.bot)
     try:
         _, token, answer = query.data.split("|")
     except ValueError:
@@ -612,6 +645,7 @@ async def on_resume_button(update: Update, context):
     query = update.callback_query
     sid = query.data.split("|", 1)[1]
     chat_id = update.effective_chat.id
+    await _cancel_mkdir_prompt(chat_id, context.bot)
     session = manager.get(chat_id)
     if session.busy:
         await query.answer("A run is in progress — /stop it first.",
@@ -628,6 +662,7 @@ async def on_resume_button(update: Update, context):
 
 
 async def on_active_button(update: Update, context):
+    await _cancel_mkdir_prompt(update.effective_chat.id, context.bot)
     await update.callback_query.answer("This session is already active.")
 
 
