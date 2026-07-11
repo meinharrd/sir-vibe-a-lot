@@ -369,17 +369,22 @@ async def cmd_voice(update: Update, context):
 cwd_browse: dict[int, tuple[Path, list[str]]] = {}
 
 
+# Telegram allows at most 100 buttons per inline keyboard; keep room for the nav row.
+MAX_DIR_BUTTONS = 96
+
+
 def _list_subdirs(path: Path) -> list[str]:
     try:
         return sorted(d.name for d in path.iterdir()
-                      if d.is_dir() and not d.name.startswith("."))[:30]
+                      if d.is_dir() and not d.name.startswith("."))
     except OSError:
         return []
 
 
 def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
     s = manager.get(chat_id)
-    subs = _list_subdirs(path)
+    all_subs = _list_subdirs(path)
+    subs = all_subs[:MAX_DIR_BUTTONS]
     cwd_browse[chat_id] = (path, subs)
     nav = []
     if path.parent != path:
@@ -401,6 +406,9 @@ def _cwd_view(chat_id: int, path: Path) -> tuple[str, InlineKeyboardMarkup]:
     text = (f"📂 <code>{html.escape(str(path))}</code>\n"
             f"<i>{n_sessions} Claude session{'s' if n_sessions != 1 else ''}</i>\n"
             "Tap a folder to browse, ✅ to make it the working directory.")
+    hidden = len(all_subs) - len(subs)
+    if hidden:
+        text += f"\n<i>+{hidden} more folder{'s' if hidden != 1 else ''} not shown — use /cwd &lt;path&gt; to go directly.</i>"
     return text, InlineKeyboardMarkup(rows)
 
 
