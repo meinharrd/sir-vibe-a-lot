@@ -172,6 +172,17 @@ class ChatSession:
         self.busy = False
         self._needs_reconnect = False
         self.resume_choices: list[str] = []  # ids from the last /resume listing
+        # Continuous message receiver (one per connected client). Turns can
+        # start without a user prompt (background tasks re-invoke the agent
+        # when they finish), so replies must be consumed and delivered
+        # whether or not a query is in flight — a per-query
+        # receive_response() loop silently drops those turns and then feeds
+        # the buffered leftovers to the *next* query, desyncing every reply
+        # after the first background task.
+        self._receiver: asyncio.Task | None = None
+        self._turn_done: asyncio.Future | None = None
+        self._collected: list[str] = []
+        self._turn_started: float = 0.0
 
     # ---------- MCP tools Claude can call to reach the user ----------
 
@@ -264,8 +275,17 @@ class ChatSession:
             self.client = ClaudeSDKClient(options=self._build_options())
             await self.client.connect()
             self._needs_reconnect = False
+            self._receiver = asyncio.get_running_loop().create_task(
+                self._receive_loop())
 
     async def _disconnect(self):
+        if self._receiver is not None:
+            self._receiver.cancel()
+            self._receiver = None
+        fut = self._turn_done
+        if fut is not None and not fut.done():
+            fut.set_exception(RuntimeError("client disconnected mid-turn"))
+        self._turn_done = None
         if self.client is not None:
             try:
                 await self.client.disconnect()
@@ -342,7 +362,9 @@ class ChatSession:
 
     async def _run(self, prompt):
         await self._ensure_client()
-        started = time.time()
+        self._turn_started = time.time()
+        fut = asyncio.get_running_loop().create_future()
+        self._turn_done = fut
 
         if isinstance(prompt, dict):  # rich content (images etc.)
             async def gen():
@@ -352,52 +374,81 @@ class ChatSession:
         else:
             await self.client.query(prompt)
 
-        collected_text: list[str] = []
-        async for message in self.client.receive_response():
-            if isinstance(message, SystemMessage):
-                if message.subtype == "init":
-                    sid = message.data.get("session_id")
-                    if sid:
-                        self.state.session_id = sid
-                    active = message.data.get("model")
-                    if active:
-                        self.state.active_model = active
-                    self._save()
-                elif message.subtype == "compact_boundary":
-                    await self.io.status_update(self.chat_id, "🗜 compacted context")
-            elif isinstance(message, AssistantMessage):
-                if message.model:
-                    self.state.active_model = message.model
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text.strip():
-                        collected_text.append(block.text)
-                        await self.io.send_text(self.chat_id, block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        from formatting import tool_summary
-                        await self.io.status_update(
-                            self.chat_id,
-                            "🔧 " + tool_summary(block.name, block.input or {}))
-            elif isinstance(message, ResultMessage):
-                self.state.session_id = message.session_id
-                if message.total_cost_usd is not None:
-                    self.state.last_cost = message.total_cost_usd
-                    self.state.total_cost += message.total_cost_usd
-                self._save()
-                elapsed = time.time() - started
-                cost = fmt_cost(message.total_cost_usd)
-                if message.subtype == "success":
-                    await self.io.status_done(
-                        self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
-                    # /compact, /context etc. return their output only in
-                    # result.result — surface it if nothing was streamed.
-                    if not collected_text and message.result:
-                        await self.io.send_text(self.chat_id, message.result)
-                else:
-                    await self.io.status_done(
-                        self.chat_id,
-                        f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")
+        # The receiver resolves the future at the next end-of-turn
+        # (ResultMessage). If the prompt got injected into a turn that a
+        # background task started, that turn's end covers the reply too.
+        try:
+            return await fut
+        finally:
+            if self._turn_done is fut:
+                self._turn_done = None
 
-        return "\n\n".join(collected_text)
+    async def _receive_loop(self):
+        """Consume and deliver every message the agent produces, for the
+        lifetime of the client — including turns no query started."""
+        try:
+            async for message in self.client.receive_messages():
+                await self._handle_message(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("receiver died for chat %s", self.chat_id)
+            self._needs_reconnect = True
+            fut = self._turn_done
+            if fut is not None and not fut.done():
+                fut.set_exception(e)
+
+    async def _handle_message(self, message):
+        if not self._turn_started:  # turn started by a background task
+            self._turn_started = time.time()
+        if isinstance(message, SystemMessage):
+            if message.subtype == "init":
+                sid = message.data.get("session_id")
+                if sid:
+                    self.state.session_id = sid
+                active = message.data.get("model")
+                if active:
+                    self.state.active_model = active
+                self._save()
+            elif message.subtype == "compact_boundary":
+                await self.io.status_update(self.chat_id, "🗜 compacted context")
+        elif isinstance(message, AssistantMessage):
+            if message.model:
+                self.state.active_model = message.model
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    self._collected.append(block.text)
+                    await self.io.send_text(self.chat_id, block.text)
+                elif isinstance(block, ToolUseBlock):
+                    from formatting import tool_summary
+                    await self.io.status_update(
+                        self.chat_id,
+                        "🔧 " + tool_summary(block.name, block.input or {}))
+        elif isinstance(message, ResultMessage):
+            self.state.session_id = message.session_id
+            if message.total_cost_usd is not None:
+                self.state.last_cost = message.total_cost_usd
+                self.state.total_cost += message.total_cost_usd
+            self._save()
+            elapsed = time.time() - self._turn_started
+            cost = fmt_cost(message.total_cost_usd)
+            if message.subtype == "success":
+                await self.io.status_done(
+                    self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
+                # /compact, /context etc. return their output only in
+                # result.result — surface it if nothing was streamed.
+                if not self._collected and message.result:
+                    await self.io.send_text(self.chat_id, message.result)
+            else:
+                await self.io.status_done(
+                    self.chat_id,
+                    f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")
+            text = "\n\n".join(self._collected)
+            self._collected = []
+            self._turn_started = 0.0
+            fut = self._turn_done
+            if fut is not None and not fut.done():
+                fut.set_result(text)
 
 
 class ChatManager:
