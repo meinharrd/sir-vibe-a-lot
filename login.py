@@ -10,8 +10,10 @@ import asyncio
 import os
 import pty
 import re
+import shutil
 import signal
 import subprocess
+from pathlib import Path
 
 URL_RE = re.compile(r"https://claude\.com/[^\s\x07\x1b\"]+")
 TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")
@@ -36,6 +38,24 @@ class LoginError(Exception):
     pass
 
 
+def _find_claude() -> str:
+    """Locate the claude CLI. Under systemd the service PATH is minimal,
+    so check the same install locations the Agent SDK falls back to."""
+    if cli := shutil.which("claude"):
+        return cli
+    for path in (
+        Path.home() / ".local/bin/claude",
+        Path.home() / ".npm-global/bin/claude",
+        Path("/usr/local/bin/claude"),
+        Path.home() / "node_modules/.bin/claude",
+        Path.home() / ".yarn/bin/claude",
+        Path.home() / ".claude/local/claude",
+    ):
+        if path.is_file():
+            return str(path)
+    raise LoginError("claude CLI not found on this machine")
+
+
 class LoginFlow:
     """One interactive `claude setup-token` run.
 
@@ -49,10 +69,11 @@ class LoginFlow:
         self._buf = ""
 
     async def start(self, timeout: float = 30.0) -> str:
+        cli = _find_claude()
         master, slave = pty.openpty()
         try:
             self._proc = subprocess.Popen(
-                ["claude", "setup-token"],
+                [cli, "setup-token"],
                 stdin=slave, stdout=slave, stderr=slave,
                 env=dict(os.environ, TERM="xterm-256color"),
                 start_new_session=True)
