@@ -31,6 +31,7 @@ import audio
 import config
 from claude_bridge import ChatManager, TelegramIO, image_prompt, _project_dir
 from formatting import md_to_telegram_html, split_message
+from login import LoginFlow, LoginError
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO)
@@ -50,6 +51,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
 /voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
 /cwd <i>[path]</i> — browse &amp; change Claude's working directory
+/login — log in to a Claude account (OAuth link, no SSH needed)
 /restartbot — restart the bot process (after code changes)
 /help — this message
 
@@ -301,8 +303,8 @@ def _model_line(st) -> str:
 
 def _billing_line(st) -> str:
     if config.BILLING_MODE == "subscription":
-        plan = (config.SUBSCRIPTION_PLAN or "").title()
-        line = f"<b>billing</b>: Claude {plan} subscription (no per-token charges)"
+        plan = f" {config.SUBSCRIPTION_PLAN.title()}" if config.SUBSCRIPTION_PLAN else ""
+        line = f"<b>billing</b>: Claude{plan} subscription (no per-token charges)"
     elif config.BILLING_MODE == "api":
         line = "<b>billing</b>: API key — costs are real charges"
     else:
@@ -538,6 +540,96 @@ async def on_cwd_button(update: Update, context):
         pass
 
 
+# chat_id -> (flow, login message_id) awaiting a pasted OAuth code
+login_pending: dict[int, tuple[LoginFlow, int]] = {}
+
+LOGIN_EXPIRE_S = 900
+
+
+async def _cancel_login(chat_id: int, bot, note: str = "❌ Login cancelled.") -> None:
+    entry = login_pending.pop(chat_id, None)
+    if entry is None:
+        return
+    flow, msg_id = entry
+    await flow.cancel()
+    try:
+        await bot.edit_message_text(note, chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+
+
+async def _expire_login(chat_id: int, bot, flow: LoginFlow) -> None:
+    await asyncio.sleep(LOGIN_EXPIRE_S)
+    entry = login_pending.get(chat_id)
+    if entry is not None and entry[0] is flow:
+        await _cancel_login(chat_id, bot,
+                            "⌛️ Login expired — run /login to start over.")
+
+
+async def cmd_login(update: Update, context):
+    chat_id = update.effective_chat.id
+    await _cancel_login(chat_id, context.bot)
+    msg = await update.message.reply_text("🔑 Starting login flow…")
+    flow = LoginFlow()
+    try:
+        url = await flow.start()
+    except (LoginError, OSError) as e:
+        await flow.cancel()
+        await msg.edit_text(f"⚠️ Could not start login: {e}"[:4000])
+        return
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel", callback_data="lg|x")]])
+    await msg.edit_text(
+        "🔑 <b>Log in to Claude</b>\n\n"
+        f'1. <a href="{html.escape(url, quote=True)}">Open this link</a> '
+        "and authorize.\n"
+        "2. Copy the code it shows and send it here as a normal message.\n\n"
+        "The bot will use this account for all chats. Any message that isn't "
+        "a code cancels the login.",
+        parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    login_pending[chat_id] = (flow, msg.message_id)
+    asyncio.get_running_loop().create_task(
+        _expire_login(chat_id, context.bot, flow))
+
+
+async def _handle_login_code(update: Update, context) -> bool:
+    """If a login is pending, consume the message. Returns True if handled."""
+    chat_id = update.effective_chat.id
+    entry = login_pending.get(chat_id)
+    if entry is None:
+        return False
+    flow, msg_id = entry
+    code = update.message.text.strip()
+    if len(code) < 20 or any(c.isspace() for c in code):
+        # doesn't look like an OAuth code — cancel and handle normally
+        await _cancel_login(chat_id, context.bot)
+        return False
+    login_pending.pop(chat_id, None)
+    status = await update.message.reply_text("🔑 Verifying code…")
+    try:
+        token = await flow.submit_code(code)
+    except LoginError as e:
+        await status.edit_text(f"⚠️ {e}\n\nRun /login to try again."[:4000])
+        return True
+    config.save_oauth_token(token)
+    for s in manager.sessions.values():
+        s.mark_dirty()  # reconnect with the new token on the next message
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=msg_id, reply_markup=None)
+    except Exception:
+        pass
+    await status.edit_text(
+        "✅ Logged in. The token is stored and every chat now uses this "
+        "account (starting with the next message).")
+    return True
+
+
+async def on_login_button(update: Update, context):
+    await update.callback_query.answer("Cancelled.")
+    await _cancel_login(update.effective_chat.id, context.bot)
+
+
 async def cmd_restartbot(update: Update, context):
     await update.message.reply_text("♻️ Restarting the bot… back in a few seconds.")
     subprocess.Popen(
@@ -556,6 +648,8 @@ def _submit(update: Update, prompt, was_voice: bool = False):
 
 async def on_text(update: Update, context):
     chat_id = update.effective_chat.id
+    if await _handle_login_code(update, context):
+        return
     if chat_id in cwd_mkdir_pending:
         base, prompt_id, browse_id = cwd_mkdir_pending[chat_id]
         reply_to = update.message.reply_to_message
@@ -706,6 +800,7 @@ async def post_init(app: Application):
         BotCommand("mode", "tool permissions: ask / auto"),
         BotCommand("voice", "voice replies: off / auto / always"),
         BotCommand("cwd", "change working directory"),
+        BotCommand("login", "log in to a Claude account"),
         BotCommand("restartbot", "restart the bot process"),
         BotCommand("compact", "compact the conversation (Claude)"),
         BotCommand("help", "show help"),
@@ -727,6 +822,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_resume_button, pattern=r"^r\|"))
     app.add_handler(CallbackQueryHandler(on_active_button, pattern=r"^ra\|"))
     app.add_handler(CallbackQueryHandler(on_cwd_button, pattern=r"^d\|"))
+    app.add_handler(CallbackQueryHandler(on_login_button, pattern=r"^lg\|"))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
@@ -738,6 +834,7 @@ def main():
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(CommandHandler("cwd", cmd_cwd))
+    app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("restartbot", cmd_restartbot))
     app.add_handler(MessageHandler(filters.COMMAND, on_unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

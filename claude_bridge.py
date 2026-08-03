@@ -54,11 +54,11 @@ Output rules:
 
 Self-maintenance: this bot's own source code lives in
 {config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
-formatting.py, config.py; git repo; venv at .venv). When the user asks you to
-change or improve the bot:
+formatting.py, config.py, login.py; git repo; venv at .venv). When the user
+asks you to change or improve the bot:
 1. Edit the code there.
 2. Verify it compiles: .venv/bin/python -m py_compile bot.py claude_bridge.py
-   audio.py formatting.py config.py
+   audio.py formatting.py config.py login.py
 3. Commit your change to git (so it can be rolled back with git revert).
 4. Tell the user what you changed, then apply it with a DELAYED restart:
    sudo systemd-run --on-active=5 systemctl restart {config.SERVICE_NAME}
@@ -251,7 +251,12 @@ class ChatSession:
 
     def _build_options(self) -> ClaudeAgentOptions:
         ask = self.state.mode == "ask"
+        env = {}
+        token = config.load_oauth_token()
+        if token:  # from the /login flow — overrides the host's ~/.claude login
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         return ClaudeAgentOptions(
+            env=env,
             cwd=self.state.cwd,
             model=self.state.model,
             resume=self.state.session_id,

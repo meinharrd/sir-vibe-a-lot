@@ -40,6 +40,25 @@ SAFE_TOOLS = {
 
 PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min
 
+# Long-lived OAuth token captured by the /login flow (claude setup-token).
+# When present it is passed to every Claude session via CLAUDE_CODE_OAUTH_TOKEN,
+# taking precedence over the host's ~/.claude login.
+OAUTH_TOKEN_FILE = DATA_DIR / "oauth_token"
+
+
+def load_oauth_token() -> str | None:
+    try:
+        return OAUTH_TOKEN_FILE.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def save_oauth_token(token: str) -> None:
+    fd = os.open(OAUTH_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(token + "\n")
+    OAUTH_TOKEN_FILE.chmod(0o600)
+
 
 def _detect_billing() -> tuple[str, str | None]:
     """How Claude usage is paid for.
@@ -59,6 +78,8 @@ def _detect_billing() -> tuple[str, str | None]:
             return "subscription", plan
     except Exception:
         pass
+    if load_oauth_token():  # /login token (setup-token requires a subscription)
+        return "subscription", None
     return "unknown", None
 
 

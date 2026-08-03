@@ -20,6 +20,8 @@ Claude login, settings, skills, and slash commands. Speech-to-text
 - **Photos/files in** — sent to Claude as vision input / saved to disk
 - **Images/files/voice out** — Claude gets `send_photo`, `send_file`, and
   `send_voice` MCP tools to message you directly
+- **Remote login** — `/login` runs Claude's OAuth flow over Telegram: tap the
+  link, paste the code back, done (no SSH needed)
 - **Self-maintaining** — ask the bot to improve its own code; it edits,
   compile-checks, commits, and schedules its own restart
 - **Owner-locked** — only Telegram user IDs in `OWNER_IDS` can use it
@@ -29,8 +31,9 @@ Claude login, settings, skills, and slash commands. Speech-to-text
 ## Requirements
 
 - Linux with systemd, Python 3.11+, `ffmpeg`
-- [Claude Code](https://claude.com/claude-code) installed and logged in
-  (`claude` must work for the user that runs the bot)
+- [Claude Code](https://claude.com/claude-code) installed for the user that
+  runs the bot; log in on the host, or later via `/login` in the chat
+  (which stores a long-lived token in `data/oauth_token`)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ## Setup
@@ -78,6 +81,7 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `/mode ask\|auto` | tool permission prompts on/off |
 | `/voice off\|auto\|always` | voice replies |
 | `/cwd <path>` | change Claude's working directory (starts a new session) |
+| `/login` | log in to a Claude account via OAuth link + pasted code |
 | `/restartbot` | restart the bot process (after code changes) |
 | anything else starting with `/` | passed to Claude Code verbatim |
 

@@ -1,0 +1,161 @@
+"""Remote Claude login: drives `claude setup-token` over a pty.
+
+The TUI-only OAuth flow can't run through the Agent SDK, but `claude
+setup-token` needs nothing more than a terminal: it prints a sign-in URL,
+waits for the pasted authorization code, and emits a long-lived OAuth token.
+This module runs it in a pseudo-terminal so the URL and code can travel over
+Telegram instead.
+"""
+import asyncio
+import os
+import pty
+import re
+import signal
+import subprocess
+
+URL_RE = re.compile(r"https://claude\.com/[^\s\x07\x1b\"]+")
+TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")
+FAIL_RE = re.compile(r"invalid|expired|failed|error", re.IGNORECASE)
+
+_ANSI_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC (hyperlinks, window title)
+    r"|\x1b\[[0-9;<>=?]*[A-Za-z]"         # CSI (colors, cursor moves)
+    r"|\x1b."                             # any other escape
+)
+
+
+def _clean(raw: str) -> str:
+    """Human-readable text from raw pty output (words are positioned with
+    cursor-move sequences, so escapes become spaces, not nothing)."""
+    text = _ANSI_RE.sub(" ", raw)
+    lines = (" ".join(l.split()) for l in text.replace("\r", "\n").split("\n"))
+    return "\n".join(l for l in lines if l).strip()
+
+
+class LoginError(Exception):
+    pass
+
+
+class LoginFlow:
+    """One interactive `claude setup-token` run.
+
+    start() returns the sign-in URL; submit_code() feeds the pasted code
+    back and returns the long-lived token; cancel() kills the process.
+    """
+
+    def __init__(self):
+        self._proc: subprocess.Popen | None = None
+        self._fd: int | None = None
+        self._buf = ""
+
+    async def start(self, timeout: float = 30.0) -> str:
+        master, slave = pty.openpty()
+        try:
+            self._proc = subprocess.Popen(
+                ["claude", "setup-token"],
+                stdin=slave, stdout=slave, stderr=slave,
+                env=dict(os.environ, TERM="xterm-256color"),
+                start_new_session=True)
+        finally:
+            os.close(slave)
+        self._fd = master
+        try:
+            await self._read_until(
+                lambda: URL_RE.search(self._buf) and "Paste" in self._buf,
+                timeout)
+        except Exception:
+            await self.cancel()
+            raise
+        return URL_RE.search(self._buf).group(0)
+
+    async def submit_code(self, code: str, timeout: float = 120.0) -> str:
+        if self._fd is None:
+            raise LoginError("The login flow is no longer running.")
+        mark = len(self._buf)
+        os.write(self._fd, code.strip().encode() + b"\r")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            while True:
+                chunk = await self._read_chunk(1.0)
+                if chunk:
+                    self._buf += chunk.decode(errors="replace")
+                    continue
+                # Quiet for a second, or EOF: any token is now complete.
+                # (Matching on every chunk could return a half-received one.)
+                m = TOKEN_RE.search(self._buf, mark)
+                if m:
+                    return m.group(0)
+                # clean before dropping the echoed code, so no escape
+                # sequence is sliced in half
+                new = _clean(self._buf[mark:]).replace(code.strip(), "")
+                if chunk == b"" or FAIL_RE.search(new):
+                    raise LoginError(
+                        "Login failed:\n" + (new.strip()[-500:] or "(no output)"))
+                if loop.time() >= deadline:
+                    raise LoginError("Timed out waiting for the code to be accepted.")
+        finally:
+            await self.cancel()
+
+    async def cancel(self):
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                os.killpg(self._proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        if self._proc is not None:
+            proc = self._proc
+            self._proc = None
+            try:
+                await asyncio.to_thread(proc.wait, 5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    async def _read_until(self, cond, timeout: float):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not cond():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise LoginError(
+                    "Timed out waiting for `claude setup-token`:\n"
+                    + _clean(self._buf)[-500:])
+            chunk = await self._read_chunk(remaining)
+            if chunk is None:
+                continue
+            if chunk == b"":
+                raise LoginError(
+                    "`claude setup-token` exited early:\n"
+                    + (_clean(self._buf)[-500:] or "(no output)"))
+            self._buf += chunk.decode(errors="replace")
+
+    async def _read_chunk(self, timeout: float) -> bytes | None:
+        """One pty read: bytes, b"" on EOF, None on timeout."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        fd = self._fd
+        if fd is None:
+            return b""
+
+        def on_readable():
+            loop.remove_reader(fd)
+            if fut.done():
+                return
+            try:
+                fut.set_result(os.read(fd, 4096))
+            except OSError:  # EIO — slave side closed
+                fut.set_result(b"")
+
+        loop.add_reader(fd, on_readable)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            loop.remove_reader(fd)
