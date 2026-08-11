@@ -29,7 +29,7 @@ from telegram.ext import (
 
 import audio
 import config
-from claude_bridge import ChatManager, TelegramIO, image_prompt, _project_dir
+from claude_bridge import ChatManager, TelegramIO, fmt_reset, image_prompt, _project_dir
 from formatting import md_to_telegram_html, split_message
 from login import LoginFlow, LoginError
 
@@ -287,6 +287,9 @@ async def cmd_status(update: Update, context):
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
         + (f" · queued: {s.queue.qsize()}" if s.queue.qsize() else ""),
     ]
+    if time.time() < s.limited_until:
+        lines.append(
+            "<b>usage limit</b>: active — resumes ~" + fmt_reset(s.limited_until))
     lines.append(_billing_line(st))
     if st.always_allowed:
         lines.append("<b>always allowed</b>: " + ", ".join(st.always_allowed))

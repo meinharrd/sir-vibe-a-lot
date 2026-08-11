@@ -28,6 +28,48 @@ import config
 log = logging.getLogger(__name__)
 
 
+# Usage-limit notices from Claude Code. Seen shapes:
+#   "You've hit your session limit · resets 9:10pm (UTC)"
+#   "5-hour limit reached ∙ resets 3am"
+#   "Claude AI usage limit reached|1734393600"   (older CLI, epoch suffix)
+_LIMIT_RE = re.compile(
+    r"hit your (?:session|usage) limit|usage limit reached|hour limit reached",
+    re.I)
+_RESET_EPOCH_RE = re.compile(r"\|\s*(\d{9,})")
+_RESET_TIME_RE = re.compile(
+    r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.I)
+
+
+def parse_limit_reset(text: str | None) -> float | None:
+    """Epoch seconds when `text` is a usage-limit notice, else None.
+    Times without a date are interpreted as the next occurrence in UTC
+    (the notices render UTC on this host). Unparseable reset → +30 min."""
+    if not text or not _LIMIT_RE.search(text):
+        return None
+    now = time.time()
+    m = _RESET_EPOCH_RE.search(text)
+    if m:
+        return float(m.group(1))
+    m = _RESET_TIME_RE.search(text)
+    if m:
+        hour = int(m.group(1)) % 12
+        if (m.group(3) or "").lower() == "pm":
+            hour += 12
+        minute = int(m.group(2) or 0)
+        t = time.gmtime(now)
+        import calendar
+        reset = calendar.timegm(
+            (t.tm_year, t.tm_mon, t.tm_mday, hour, minute, 0, 0, 0, 0))
+        while reset <= now:
+            reset += 12 * 3600  # am/pm ambiguity: try the next half-day
+        return reset
+    return now + 30 * 60
+
+
+def fmt_reset(ts: float) -> str:
+    return time.strftime("%H:%M UTC", time.gmtime(ts))
+
+
 def fmt_cost(usd: float | None) -> str:
     """Label costs by billing mode: subscription usage is an estimate (≈),
     API-key usage is an actual charge ($)."""
@@ -183,6 +225,11 @@ class ChatSession:
         self._turn_done: asyncio.Future | None = None
         self._collected: list[str] = []
         self._turn_started: float = 0.0
+        # Usage-limit backoff: epoch until which prompts are held. Set when a
+        # turn ends in a limit notice; the worker sleeps it out and retries,
+        # so the bot stays responsive (acks + queues) instead of erroring.
+        self.limited_until: float = 0.0
+        self._hit_limit = False
 
     # ---------- MCP tools Claude can call to reach the user ----------
 
@@ -342,22 +389,57 @@ class ChatSession:
     def submit(self, prompt, want_voice: bool = False):
         """Queue a prompt (str, or dict for rich content). Starts worker."""
         self.queue.put_nowait((prompt, want_voice))
+        if time.time() < self.limited_until:
+            asyncio.get_running_loop().create_task(self.io.send_text(
+                self.chat_id,
+                f"⏳ Claude usage limit is active — queued; I'll process this "
+                f"automatically after the reset (~{fmt_reset(self.limited_until)}).",
+                markdown=False))
         if self.worker is None or self.worker.done():
             self.worker = asyncio.get_running_loop().create_task(self._worker())
         return self.queue.qsize()
 
+    async def _wait_if_limited(self):
+        """Sleep out an active usage-limit window (chunked, so a restart or
+        an earlier-than-advertised reset doesn't strand the queue long)."""
+        while True:
+            wait = self.limited_until - time.time()
+            if wait <= 0:
+                return
+            await asyncio.sleep(min(wait + 5, 300))
+
     async def _worker(self):
         while not self.queue.empty():
+            await self._wait_if_limited()
             prompt, want_voice = await self.queue.get()
             self.busy = True
+            self._hit_limit = False
             try:
                 text = await self._run(prompt)
+                if self._hit_limit:
+                    # The turn died on the usage limit: re-queue the prompt and
+                    # let the loop sleep out the window, then retry it.
+                    self.queue.put_nowait((prompt, want_voice))
+                    continue
                 if want_voice and text:
                     try:
                         await self.io.send_voice_text(self.chat_id, text)
                     except Exception as e:
                         log.warning("TTS failed: %s", e)
             except Exception as e:
+                reset_ts = parse_limit_reset(str(e))
+                if reset_ts:
+                    # Limit surfaced as an exception (e.g. connect failure):
+                    # same treatment — back off, re-queue, retry.
+                    self.limited_until = max(self.limited_until, reset_ts)
+                    self._needs_reconnect = True
+                    self.queue.put_nowait((prompt, want_voice))
+                    await self.io.send_text(
+                        self.chat_id,
+                        f"⏳ Claude usage limit reached — I'll retry "
+                        f"automatically after the reset (~{fmt_reset(self.limited_until)}).",
+                        markdown=False)
+                    continue
                 log.exception("query failed for chat %s", self.chat_id)
                 self._needs_reconnect = True
                 await self.io.send_text(
@@ -437,7 +519,20 @@ class ChatSession:
             self._save()
             elapsed = time.time() - self._turn_started
             cost = fmt_cost(message.total_cost_usd)
-            if message.subtype == "success":
+            reset_ts = parse_limit_reset(message.result or "")
+            if reset_ts:
+                # Usage limit — regardless of subtype. Flag the turn so the
+                # worker re-queues its prompt, and tell the user once with
+                # the reset time instead of surfacing the raw notice.
+                self.limited_until = max(self.limited_until, reset_ts)
+                self._hit_limit = True
+                self._needs_reconnect = True
+                await self.io.status_done(
+                    self.chat_id,
+                    f"⏳ Claude usage limit reached — resuming automatically "
+                    f"after the reset (~{fmt_reset(self.limited_until)}). "
+                    f"Messages sent meanwhile are queued.")
+            elif message.subtype == "success":
                 await self.io.status_done(
                     self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
                 # /compact, /context etc. return their output only in
