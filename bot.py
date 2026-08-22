@@ -15,7 +15,7 @@ from telegram import (
     Update,
     BotCommand,
 )
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -167,11 +167,28 @@ async def gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user is not None and user.id in config.OWNER_IDS:
         return
+    # Added to a group by a non-owner: leave immediately.
+    mcm = update.my_chat_member
+    if (mcm is not None
+            and mcm.chat.type != ChatType.PRIVATE
+            and mcm.new_chat_member.status in (
+                ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.RESTRICTED)):
+        log.warning("Added to chat id=%s title=%r by non-owner id=%s — leaving.",
+                    mcm.chat.id, mcm.chat.title, user.id if user else None)
+        try:
+            await context.bot.leave_chat(mcm.chat.id)
+        except Exception:
+            log.exception("Failed to leave chat %s", mcm.chat.id)
+        raise ApplicationHandlerStop
     if update.effective_message and user is not None:
         log.warning("Unauthorized user id=%s username=%s", user.id, user.username)
-        await update.effective_message.reply_text(
-            f"Not authorized. Your Telegram user ID is {user.id}.\n"
-            "Add it to OWNER_IDS in the bot's .env file and restart.")
+        # Reply only in private chats; stay silent in groups so a second
+        # member (or a stranger's group) isn't spammed on every message.
+        if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+            await update.effective_message.reply_text(
+                f"Not authorized. Your Telegram user ID is {user.id}.\n"
+                "Add it to OWNER_IDS in the bot's .env file and restart.")
     raise ApplicationHandlerStop
 
 
