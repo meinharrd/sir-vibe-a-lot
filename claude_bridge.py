@@ -324,6 +324,20 @@ class ChatSession:
         if self.client is not None and self._needs_reconnect:
             await self._disconnect()
         if self.client is None:
+            sid = self.state.session_id
+            if sid and not (_project_dir(self.state.cwd) / f"{sid}.jsonl").is_file():
+                # A resume id with no transcript for this cwd makes the CLI
+                # exit 1 ("No conversation found") on every connect, wedging
+                # the chat until the id is cleared.
+                log.warning("chat %s: dropping stale session %s (no transcript in %s)",
+                            self.chat_id, sid, self.state.cwd)
+                self.state.session_id = None
+                self._save()
+                await self.io.send_text(
+                    self.chat_id,
+                    "⚠️ The previous session's transcript is missing for this "
+                    "working directory — starting a fresh session.",
+                    markdown=False)
             self.client = ClaudeSDKClient(options=self._build_options())
             await self.client.connect()
             self._needs_reconnect = False
@@ -491,7 +505,7 @@ class ChatSession:
         if isinstance(message, SystemMessage):
             if message.subtype == "init":
                 sid = message.data.get("session_id")
-                if sid:
+                if sid and not self._needs_reconnect:
                     self.state.session_id = sid
                 active = message.data.get("model")
                 if active:
@@ -512,7 +526,11 @@ class ChatSession:
                         self.chat_id,
                         "🔧 " + tool_summary(block.name, block.input or {}))
         elif isinstance(message, ResultMessage):
-            self.state.session_id = message.session_id
+            if not self._needs_reconnect:
+                # After /cwd (or /model, /mode) marked the client dirty, this
+                # id belongs to the old options — writing it back would undo
+                # e.g. the session reset that /cwd just did.
+                self.state.session_id = message.session_id
             if message.total_cost_usd is not None:
                 self.state.last_cost = message.total_cost_usd
                 self.state.total_cost += message.total_cost_usd
