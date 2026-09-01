@@ -58,6 +58,8 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 <b>Claude slash commands</b>
 Anything else starting with / is passed to Claude Code itself:
 /compact, /context, /usage, /code-review, plus your custom skills.
+In group chats, address them to the bot explicitly (e.g. /compact@this_bot)
+— unaddressed commands are ignored so other bots' commands don't trigger Claude.
 """
 
 
@@ -666,7 +668,7 @@ def _submit(update: Update, prompt, was_voice: bool = False):
     return session, queued
 
 
-async def on_text(update: Update, context):
+async def on_text(update: Update, context, text: str | None = None):
     chat_id = update.effective_chat.id
     if await _handle_login_code(update, context):
         return
@@ -696,7 +698,8 @@ async def on_text(update: Update, context):
             return
         # any non-reply message cancels the prompt and is handled normally
         await _cancel_mkdir_prompt(chat_id, context.bot)
-    session, queued = _submit(update, update.message.text)
+    session, queued = _submit(update, text if text is not None
+                              else update.message.text)
     if queued > 1 or session.busy:
         await update.message.reply_text(f"⏳ Queued (position {queued}).")
 
@@ -704,7 +707,18 @@ async def on_text(update: Update, context):
 async def on_unknown_command(update: Update, context):
     # Pass unrecognized /commands straight through to Claude Code
     # (/compact, /context, /usage, /code-review, custom skills, ...).
-    await on_text(update, context)
+    text = update.message.text
+    cmd, _, rest = text.partition(" ")
+    _, _, mention = cmd.partition("@")
+    if mention and mention.lower() != context.bot.username.lower():
+        return  # addressed to a different bot
+    if not mention and update.effective_chat.type != ChatType.PRIVATE:
+        # With group privacy mode Telegram delivers every /command in the
+        # group, including other bots' — only act when explicitly addressed.
+        return
+    if mention:
+        text = f"{cmd.partition('@')[0]} {rest}".strip()
+    await on_text(update, context, text)
 
 
 async def on_voice(update: Update, context):
