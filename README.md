@@ -14,9 +14,9 @@ Claude login, settings, skills, and slash commands. Speech-to-text
 - **Slash-command pass-through**: `/compact`, `/context`, `/usage`,
   `/code-review`, and your custom skills go straight to Claude Code
 - **Tool permissions like the TUI**: inline Allow / Deny / Always-allow
-  buttons (`/mode auto` to auto-approve everything)
+  buttons (`/mode ask`; new chats default to `/mode auto`)
 - **Voice notes in** — transcribed locally with faster-whisper
-- **Voice replies out** — Piper TTS (`/voice off|auto|always`)
+- **Voice replies out** — Piper TTS (`/voice off|auto|always`, off by default)
 - **Photos/files in** — sent to Claude as vision input / saved to disk
 - **Images/files/voice out** — Claude gets `send_photo`, `send_file`, and
   `send_voice` MCP tools to message you directly
@@ -99,10 +99,10 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 ## Security notes
 
 - The bot gives Claude tool access to the machine it runs on. Keep `OWNER_IDS`
-  tight and prefer `/mode ask` (the default), which confirms every
-  non-read-only tool call with buttons.
-- `/mode auto` runs Claude with `bypassPermissions`: anyone controlling an
-  owner Telegram account can then run arbitrary commands on the host.
+  tight. New chats start in `/mode auto`, which runs Claude with
+  `bypassPermissions`: anyone controlling an owner Telegram account can then
+  run arbitrary commands on the host. Switch a chat to `/mode ask` to confirm
+  every non-read-only tool call with buttons instead.
 - Sessions are scoped to the working directory; state lives in
   `data/state.json`, received media under `data/media/` (both git-ignored,
   as is `.env`).

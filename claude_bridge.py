@@ -124,8 +124,8 @@ class ChatState:
     cwd: str = config.DEFAULT_CWD
     model: str | None = None        # what the user requested (None = default)
     active_model: str | None = None  # actual model id reported by the SDK
-    mode: str = "ask"           # "ask" | "auto"
-    voice: str = "auto"         # "off" | "auto" | "always"
+    mode: str = "auto"          # "ask" | "auto"
+    voice: str = "off"          # "off" | "auto" | "always"
     always_allowed: list[str] = field(default_factory=list)
     last_cost: float | None = None
     total_cost: float = 0.0
