@@ -7,12 +7,15 @@ This module runs it in a pseudo-terminal so the URL and code can travel over
 Telegram instead.
 """
 import asyncio
+import fcntl
 import os
 import pty
 import re
 import shutil
 import signal
+import struct
 import subprocess
+import termios
 from pathlib import Path
 
 URL_RE = re.compile(r"https://claude\.com/[^\s\x07\x1b\"]+")
@@ -71,6 +74,10 @@ class LoginFlow:
     async def start(self, timeout: float = 30.0) -> str:
         cli = _find_claude()
         master, slave = pty.openpty()
+        # Wide terminal: at the default 80 columns the CLI hard-wraps long
+        # lines, splitting the OAuth token across lines so a regex over the
+        # output would capture only its first fragment.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 500, 0, 0))
         try:
             self._proc = subprocess.Popen(
                 [cli, "setup-token"],
@@ -93,7 +100,12 @@ class LoginFlow:
         if self._fd is None:
             raise LoginError("The login flow is no longer running.")
         mark = len(self._buf)
-        os.write(self._fd, code.strip().encode() + b"\r")
+        os.write(self._fd, code.strip().encode())
+        # The CLI groups rapid input as a bracketed paste: a "\r" in the same
+        # chunk is swallowed into the pasted text instead of submitting the
+        # form. Pause past the paste-detection window, then press Enter.
+        await asyncio.sleep(0.5)
+        os.write(self._fd, b"\r")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         try:
@@ -108,8 +120,10 @@ class LoginFlow:
                 if m:
                     return m.group(0)
                 # clean before dropping the echoed code, so no escape
-                # sequence is sliced in half
+                # sequence is sliced in half; the CLI masks the paste with
+                # asterisks, so drop those runs too
                 new = _clean(self._buf[mark:]).replace(code.strip(), "")
+                new = re.sub(r"\*{4,}\S*", "", new)
                 if chunk == b"" or FAIL_RE.search(new):
                     raise LoginError(
                         "Login failed:\n" + (new.strip()[-500:] or "(no output)"))
