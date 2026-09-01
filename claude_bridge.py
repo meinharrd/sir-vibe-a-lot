@@ -1,9 +1,14 @@
 """Per-chat bridge between Telegram and the Claude Agent SDK."""
 import asyncio
 import base64
+import functools
 import json
 import logging
+import mmap
+import os
 import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,6 +137,86 @@ def _project_dir(cwd: str) -> Path:
 
 
 MAX_CONTEXT_TOKENS = 200_000
+
+MODEL_ALIASES = ("fable", "opus", "sonnet", "haiku")
+
+
+def _cli_path() -> str | None:
+    """The Claude Code binary the SDK will spawn (mirrors its lookup order:
+    the SDK's bundled copy first, then PATH, then ~/.local/bin)."""
+    import claude_agent_sdk
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    if bundled.is_file():
+        return str(bundled)
+    if found := shutil.which("claude"):
+        return found
+    local = Path.home() / ".local/bin/claude"
+    return str(local) if local.is_file() else None
+
+
+@functools.lru_cache(maxsize=1)
+def cli_version() -> str | None:
+    path = _cli_path()
+    if not path:
+        return None
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True,
+                             timeout=15).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("claude --version failed: %s", e)
+        return None
+    return out.split()[0] if out else None  # "2.1.257 (Claude Code)" -> "2.1.257"
+
+
+@functools.lru_cache(maxsize=1)
+def model_aliases() -> dict[str, str]:
+    """What each short alias (fable/opus/sonnet/haiku) resolves to.
+
+    Aliases are resolved client-side inside the Claude Code binary, so the
+    table is read out of the binary the SDK actually runs — the host's
+    `claude` may be a different version.  ANTHROPIC_DEFAULT_<ALIAS>_MODEL
+    env vars override the built-in mapping, as they do in the CLI.
+    """
+    table: dict[str, str] = {}
+    path = _cli_path()
+    if path:
+        # A regex over the ~200 MB binary takes seconds; a literal find for the
+        # rare `:"claude-` marker and a local match around each hit is fast.
+        pat = re.compile(rb'\b(fable|opus|sonnet|haiku):"(claude-[a-z0-9-]+)"')
+        try:
+            with open(path, "rb") as f, \
+                    mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                pos = 0
+                while (pos := mm.find(b':"claude-', pos)) != -1:
+                    if m := pat.search(mm, max(0, pos - 6), pos + 40):
+                        table.setdefault(m.group(1).decode(), m.group(2).decode())
+                    pos += 1
+        except (OSError, ValueError) as e:
+            log.warning("could not read model aliases from %s: %s", path, e)
+    for alias in MODEL_ALIASES:
+        if env := os.environ.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"):
+            table[alias] = env
+    return table
+
+
+def default_model_setting() -> str | None:
+    """What `/model default` falls back to: ANTHROPIC_MODEL, else the `model`
+    key in ~/.claude/settings.json (the SDK loads user settings)."""
+    if env := os.environ.get("ANTHROPIC_MODEL"):
+        return env
+    try:
+        return json.loads((Path.home() / ".claude/settings.json").read_text()).get("model")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def resolve_model(name: str | None) -> str | None:
+    """Full model id for an alias, a full id, or None (= default)."""
+    if name is None:
+        name = default_model_setting()
+        if name is None:
+            return None
+    return model_aliases().get(name.lower(), name)
 
 
 def _session_meta(path: Path) -> dict | None:

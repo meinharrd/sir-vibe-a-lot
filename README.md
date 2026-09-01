@@ -77,7 +77,7 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `/stop` | interrupt the current run |
 | `/status` | session id, cwd, model, cost |
 | `/cost` | billing mode and usage totals |
-| `/model opus\|sonnet\|haiku\|default` | switch model |
+| `/model fable\|opus\|sonnet\|haiku\|default\|<model-id>` | switch model; with no argument, shows what each alias resolves to |
 | `/mode ask\|auto` | tool permission prompts on/off |
 | `/voice off\|auto\|always` | voice replies |
 | `/cwd <path>` | change Claude's working directory (starts a new session) |

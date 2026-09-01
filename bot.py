@@ -29,7 +29,10 @@ from telegram.ext import (
 
 import audio
 import config
-from claude_bridge import ChatManager, TelegramIO, fmt_reset, image_prompt, _project_dir
+from claude_bridge import (
+    MODEL_ALIASES, ChatManager, TelegramIO, cli_version, default_model_setting,
+    fmt_reset, image_prompt, model_aliases, resolve_model, _project_dir,
+)
 from formatting import md_to_telegram_html, split_message
 from login import LoginFlow, LoginError
 
@@ -50,7 +53,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /resume — resume sessions
 /stop — interrupt the current run
 /status — session info &amp; cost
-/model <i>[opus|sonnet|haiku|default]</i> — switch model
+/model <i>[fable|opus|sonnet|haiku|default|&lt;model-id&gt;]</i> — switch model (no arg: show what each resolves to)
 /login — log in to a Claude account (OAuth link, no SSH needed)
 /restartbot — restart the bot process (after code changes)
 /help — this message
@@ -320,7 +323,28 @@ def _model_line(st) -> str:
         if st.model and st.model.lower() not in st.active_model.lower():
             return f"{st.active_model} (requested: {st.model})"
         return st.active_model
-    return st.model or "default (resolves on first message)"
+    requested = st.model or "default"
+    resolved = resolve_model(st.model)
+    if resolved and resolved.lower() != requested.lower():
+        return f"{requested} → {resolved} (confirmed on first message)"
+    return f"{requested} (resolves on first message)"
+
+
+def _model_overview(st) -> str:
+    aliases = model_aliases()
+    ver = cli_version()
+    lines = [f"Current model: {_model_line(st)}", "",
+             "Aliases" + (f" (Claude Code {ver})" if ver else "") + ":"]
+    for alias in MODEL_ALIASES:
+        lines.append(f"  {alias} → {aliases.get(alias, '?')}")
+    setting = default_model_setting()
+    default = resolve_model(None)
+    if setting and default and setting.lower() != default.lower():
+        lines.append(f"  default → {setting} ({default})")
+    else:
+        lines.append(f"  default → {default or 'CLI default'}")
+    lines += ["", "Usage: /model " + " | ".join(MODEL_ALIASES) + " | default | <full-model-id>"]
+    return "\n".join(lines)
 
 
 def _billing_line(st) -> str:
@@ -349,15 +373,16 @@ async def cmd_model(update: Update, context):
     s = manager.get(update.effective_chat.id)
     arg = " ".join(context.args).strip().lower()
     if not arg:
-        await update.message.reply_text(
-            f"Current model: {_model_line(s.state)}\n"
-            "Usage: /model opus | sonnet | haiku | default | <full-model-id>")
+        await asyncio.to_thread(model_aliases)  # first call scans the CLI binary
+        await update.message.reply_text(_model_overview(s.state))
         return
     s.state.model = None if arg == "default" else arg
     s.state.active_model = None  # re-resolved on the next message
     s.mark_dirty()
     manager.save()
-    await update.message.reply_text(f"Model set to {arg}. Applies to the next message.")
+    resolved = resolve_model(s.state.model)
+    shown = f"{arg} ({resolved})" if resolved and resolved.lower() != arg else arg
+    await update.message.reply_text(f"Model set to {shown}. Applies to the next message.")
 
 
 async def cmd_mode(update: Update, context):
@@ -824,6 +849,8 @@ async def on_active_button(update: Update, context):
 
 async def post_init(app: Application):
     io.app = app
+    # Warm the alias table off the event loop so /status and /model never block.
+    asyncio.get_running_loop().run_in_executor(None, lambda: (model_aliases(), cli_version()))
     await app.bot.set_my_commands([
         BotCommand("cwd", "change working directory"),
         BotCommand("mode", "tool permissions: ask / auto"),
@@ -833,7 +860,7 @@ async def post_init(app: Application):
         BotCommand("stop", "interrupt the current run"),
         BotCommand("status", "session info and cost"),
         BotCommand("cost", "billing mode and usage totals"),
-        BotCommand("model", "switch model"),
+        BotCommand("model", "switch model: fable / opus / sonnet / haiku"),
         BotCommand("login", "log in to a Claude account"),
         BotCommand("restartbot", "restart the bot process"),
         BotCommand("compact", "compact the conversation (Claude)"),
