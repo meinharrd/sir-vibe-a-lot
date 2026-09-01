@@ -43,14 +43,14 @@ HELP = """<b>Sir Vibe-a-lot</b> — Claude Code on Telegram
 Send any text, voice note, photo, or file — it goes straight to Claude.
 
 <b>Bot commands</b>
+/cwd <i>[path]</i> — browse &amp; change Claude's working directory
+/mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
+/voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
 /new — start a fresh session
 /resume — resume sessions
 /stop — interrupt the current run
 /status — session info &amp; cost
 /model <i>[opus|sonnet|haiku|default]</i> — switch model
-/mode <i>[ask|auto]</i> — tool permissions: ask via buttons, or auto-approve
-/voice <i>[off|auto|always]</i> — voice replies (auto = reply to voice with voice)
-/cwd <i>[path]</i> — browse &amp; change Claude's working directory
 /login — log in to a Claude account (OAuth link, no SSH needed)
 /restartbot — restart the bot process (after code changes)
 /help — this message
@@ -825,15 +825,15 @@ async def on_active_button(update: Update, context):
 async def post_init(app: Application):
     io.app = app
     await app.bot.set_my_commands([
+        BotCommand("cwd", "change working directory"),
+        BotCommand("mode", "tool permissions: ask / auto"),
+        BotCommand("voice", "voice replies: off / auto / always"),
         BotCommand("new", "start a fresh session"),
         BotCommand("resume", "resume sessions"),
         BotCommand("stop", "interrupt the current run"),
         BotCommand("status", "session info and cost"),
         BotCommand("cost", "billing mode and usage totals"),
         BotCommand("model", "switch model"),
-        BotCommand("mode", "tool permissions: ask / auto"),
-        BotCommand("voice", "voice replies: off / auto / always"),
-        BotCommand("cwd", "change working directory"),
         BotCommand("login", "log in to a Claude account"),
         BotCommand("restartbot", "restart the bot process"),
         BotCommand("compact", "compact the conversation (Claude)"),
