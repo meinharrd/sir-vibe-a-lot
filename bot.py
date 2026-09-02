@@ -16,6 +16,7 @@ from telegram import (
     BotCommand,
 )
 from telegram.constants import ChatAction, ChatMemberStatus, ChatType
+from telegram.error import BadRequest, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -80,12 +81,31 @@ class TgIO(TelegramIO):
                                html.escape(text))
         for chunk in chunks:
             try:
-                await self.app.bot.send_message(chat_id, chunk, parse_mode="HTML",
-                                                disable_web_page_preview=True)
-            except Exception:
+                await self._send_retrying(chat_id, chunk, parse_mode="HTML",
+                                          disable_web_page_preview=True)
+            except BadRequest:
                 # formatting fallback: send raw text
-                await self.app.bot.send_message(
+                await self._send_retrying(
                     chat_id, chunk if not markdown else text[:4000])
+
+    async def _send_retrying(self, chat_id: int, text: str, **kw):
+        """send_message that waits out Telegram flood control / timeouts.
+
+        Only formatting errors (BadRequest) propagate to the caller; a
+        RetryAfter that escaped here used to kill the chat's receiver task
+        and drop the rest of Claude's reply."""
+        for attempt in range(5):
+            try:
+                return await self.app.bot.send_message(chat_id, text, **kw)
+            except RetryAfter as e:
+                ra = e.retry_after  # int, or timedelta in newer PTB
+                delay = (ra.total_seconds() if hasattr(ra, "total_seconds")
+                         else float(ra)) + 0.5
+                log.warning("chat %s: flood control, retrying in %.1fs", chat_id, delay)
+                await asyncio.sleep(delay)
+            except TimedOut:
+                await asyncio.sleep(2 * (attempt + 1))
+        return await self.app.bot.send_message(chat_id, text, **kw)
 
     async def send_photo(self, chat_id: int, path: str, caption: str = ""):
         with open(path, "rb") as f:
