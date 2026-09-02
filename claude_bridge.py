@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     SystemMessage,
     ResultMessage,
+    RateLimitEvent,
     TextBlock,
     ToolUseBlock,
     PermissionResultAllow,
@@ -573,6 +574,25 @@ class ChatSession:
             if self._turn_done is fut:
                 self._turn_done = None
 
+    async def _on_rate_limit(self, info):
+        """Surface Claude rate-limit transitions with an ETA. The CLI emits
+        these once per state change, so a warning is shown once, and a
+        rejection sets limited_until so the worker knows how long to wait."""
+        window = (info.rate_limit_type or "usage").replace("_", " ")
+        eta = f" · resets ~{fmt_reset(info.resets_at)}" if info.resets_at else ""
+        if info.status == "allowed_warning":
+            used = (f" · {info.utilization * 100:.0f}% used"
+                    if info.utilization is not None else "")
+            await self.io.status_update(
+                self.chat_id, f"⚠️ approaching Claude {window} limit{used}{eta}")
+        elif info.status == "rejected":
+            if info.resets_at:
+                self.limited_until = max(self.limited_until, float(info.resets_at))
+            await self.io.status_update(
+                self.chat_id,
+                f"⏳ Claude {window} limit hit — waiting for the reset{eta}. "
+                f"Messages sent meanwhile are queued.")
+
     async def _receive_loop(self):
         """Consume and deliver every message the agent produces, for the
         lifetime of the client — including turns no query started."""
@@ -602,6 +622,8 @@ class ChatSession:
                 self._save()
             elif message.subtype == "compact_boundary":
                 await self.io.status_update(self.chat_id, "🗜 compacted context")
+        elif isinstance(message, RateLimitEvent):
+            await self._on_rate_limit(message.rate_limit_info)
         elif isinstance(message, AssistantMessage):
             if message.model:
                 self.state.active_model = message.model

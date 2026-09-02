@@ -94,18 +94,56 @@ class TgIO(TelegramIO):
         Only formatting errors (BadRequest) propagate to the caller; a
         RetryAfter that escaped here used to kill the chat's receiver task
         and drop the rest of Claude's reply."""
+        waited = 0.0
+        told = False
         for attempt in range(5):
             try:
-                return await self.app.bot.send_message(chat_id, text, **kw)
+                msg = await self.app.bot.send_message(chat_id, text, **kw)
+                break
             except RetryAfter as e:
                 ra = e.retry_after  # int, or timedelta in newer PTB
                 delay = (ra.total_seconds() if hasattr(ra, "total_seconds")
                          else float(ra)) + 0.5
                 log.warning("chat %s: flood control, retrying in %.1fs", chat_id, delay)
+                # Tell the user why the reply stalls. Editing the status line
+                # is a different API method and usually still gets through
+                # while sends are throttled; it's best-effort either way.
+                eta = time.strftime("%H:%M:%S UTC", time.gmtime(time.time() + delay))
+                told = await self._status_notice(
+                    chat_id, f"⏳ Telegram rate limit — waiting {delay:.0f}s "
+                             f"(resumes ~{eta})") or told
                 await asyncio.sleep(delay)
+                waited += delay
             except TimedOut:
                 await asyncio.sleep(2 * (attempt + 1))
-        return await self.app.bot.send_message(chat_id, text, **kw)
+        else:
+            msg = await self.app.bot.send_message(chat_id, text, **kw)
+        if waited >= 5 and not told:
+            # Status edit didn't get through either — say it after the fact
+            # so the gap in the reply is at least explained.
+            try:
+                await self.app.bot.send_message(
+                    chat_id, f"ℹ️ Telegram rate-limited the bot; the reply "
+                             f"above was delayed by ~{waited:.0f}s.")
+            except Exception:
+                pass
+        return msg
+
+    async def _status_notice(self, chat_id: int, text: str) -> bool:
+        """Force-edit the chat's status line (no throttle). Returns whether
+        Telegram accepted it."""
+        entry = self._status.get(chat_id)
+        try:
+            if entry is None:
+                msg = await self.app.bot.send_message(chat_id, text)
+                self._status[chat_id] = (msg.message_id, time.monotonic())
+            else:
+                await self.app.bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=entry[0])
+                self._status[chat_id] = (entry[0], time.monotonic())
+            return True
+        except Exception:
+            return False
 
     async def send_photo(self, chat_id: int, path: str, caption: str = ""):
         with open(path, "rb") as f:
