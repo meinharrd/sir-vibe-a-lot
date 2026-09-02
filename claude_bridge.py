@@ -403,6 +403,10 @@ class ChatSession:
             ],
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": SYSTEM_APPEND},
+            # The SDK defaults to 1 MiB per JSON line from the CLI; large tool
+            # results (big file reads, long command output) exceed that and
+            # kill the session with "JSON message exceeded maximum buffer size".
+            max_buffer_size=64 * 1024 * 1024,
         )
 
     async def _ensure_client(self):
