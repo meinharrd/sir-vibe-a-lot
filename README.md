@@ -76,6 +76,7 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `/new` | fresh Claude session |
 | `/stop` | interrupt the current run |
 | `/status` | session id, cwd, model, cost |
+| `/retry` | retry queued messages now while a usage limit is active (e.g. right after topping up) |
 | `/cost` | billing mode and usage totals |
 | `/model fable\|opus\|sonnet\|haiku\|default\|<model-id>` | switch model; with no argument, shows what each alias resolves to |
 | `/mode ask\|auto` | tool permission prompts on/off |
@@ -95,6 +96,7 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `WHISPER_MODEL` | `small` | STT model: tiny / base / small / medium |
 | `PIPER_VOICE` | `en_US-lessac-medium` | TTS voice |
 | `SERVICE_NAME` | `sir-vibe-a-lot` | systemd unit name (for self-restart) |
+| `LIMIT_RETRY_INTERVAL_S` | `300` | how often queued messages are retried while a Claude usage limit is active (the limit lifts early when usage is topped up) |
 
 ## Security notes
 

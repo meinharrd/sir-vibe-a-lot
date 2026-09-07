@@ -21,6 +21,8 @@ DEFAULT_CWD = os.environ.get("CLAUDE_CWD", str(Path.home()))
 DATA_DIR = Path(os.environ.get("DATA_DIR", PROJECT_DIR / "data"))
 MEDIA_DIR = DATA_DIR / "media"
 STATE_FILE = DATA_DIR / "state.json"
+# Unanswered prompts (queued + in flight) per chat; re-submitted on startup.
+PENDING_FILE = DATA_DIR / "pending.json"
 
 # systemd unit name, used for self-restart (/restartbot and self-maintenance)
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "sir-vibe-a-lot")
@@ -39,6 +41,10 @@ SAFE_TOOLS = {
 }
 
 PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min
+
+# While a Claude usage limit is active, queued prompts are retried this often
+# (a limit can lift before the advertised reset, e.g. after buying credits).
+LIMIT_RETRY_INTERVAL_S = int(os.environ.get("LIMIT_RETRY_INTERVAL_S", "300"))
 
 # Long-lived OAuth token captured by the /login flow (claude setup-token).
 # When present it is passed to every Claude session via CLAUDE_CODE_OAUTH_TOKEN,

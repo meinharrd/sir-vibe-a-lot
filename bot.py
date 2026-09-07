@@ -31,8 +31,9 @@ from telegram.ext import (
 import audio
 import config
 from claude_bridge import (
-    MODEL_ALIASES, ChatManager, TelegramIO, cli_version, default_model_setting,
-    fmt_reset, image_prompt, model_aliases, resolve_model, _project_dir,
+    MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
+    default_model_setting, fmt_reset, image_prompt, model_aliases,
+    resolve_model, _project_dir,
 )
 from formatting import md_to_telegram_html, split_message
 from login import LoginFlow, LoginError
@@ -54,6 +55,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /resume — resume sessions
 /stop — interrupt the current run
 /status — session info &amp; cost
+/retry — retry queued messages now (e.g. right after topping up usage)
 /model <i>[fable|opus|sonnet|haiku|default|&lt;model-id&gt;]</i> — switch model (no arg: show what each resolves to)
 /login — log in to a Claude account (OAuth link, no SSH needed)
 /restartbot — restart the bot process (after code changes)
@@ -355,6 +357,20 @@ async def cmd_stop(update: Update, context):
         "🛑 Interrupted." if stopped else "Nothing is running.")
 
 
+async def cmd_retry(update: Update, context):
+    """Retry queued prompts in every chat right now (e.g. after topping up
+    usage) instead of waiting for the next automatic retry."""
+    if not USAGE_LIMIT.active:
+        await update.message.reply_text(
+            "No usage limit is active — queued messages are already running.")
+        return
+    USAGE_LIMIT.clear()
+    waiting = sum(1 for s in manager.sessions.values() if s.queue)
+    await update.message.reply_text(
+        f"🔁 Retrying now — {waiting} chat{'s' if waiting != 1 else ''} with "
+        "queued messages. If the limit is still in place I'll back off again.")
+
+
 async def cmd_status(update: Update, context):
     s = manager.get(update.effective_chat.id)
     st = s.state
@@ -365,11 +381,12 @@ async def cmd_status(update: Update, context):
         f"<b>permissions</b>: {st.mode}",
         f"<b>voice replies</b>: {st.voice}",
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
-        + (f" · queued: {s.queue.qsize()}" if s.queue.qsize() else ""),
+        + (f" · queued: {len(s.queue)}" if s.queue else ""),
     ]
-    if time.time() < s.limited_until:
+    if USAGE_LIMIT.active:
         lines.append(
-            "<b>usage limit</b>: active — resumes ~" + fmt_reset(s.limited_until))
+            f"<b>usage limit</b>: active — resets ~{fmt_reset(USAGE_LIMIT.until)}, "
+            "retrying periodically (/retry to retry now)")
     lines.append(_billing_line(st))
     if st.always_allowed:
         lines.append("<b>always allowed</b>: " + ", ".join(st.always_allowed))
@@ -924,6 +941,9 @@ async def post_init(app: Application):
         BotCommand("compact", "compact the conversation (Claude)"),
         BotCommand("help", "show help"),
     ])
+    restored = await manager.restore_pending()
+    if restored:
+        log.info("re-submitted pending prompts after restart: %s", restored)
     log.info("Bot ready.")
 
 
@@ -948,6 +968,7 @@ def main():
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("retry", cmd_retry))
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("mode", cmd_mode))

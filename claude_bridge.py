@@ -1,6 +1,7 @@
 """Per-chat bridge between Telegram and the Claude Agent SDK."""
 import asyncio
 import base64
+import collections
 import functools
 import json
 import logging
@@ -74,6 +75,61 @@ def parse_limit_reset(text: str | None) -> float | None:
 
 def fmt_reset(ts: float) -> str:
     return time.strftime("%H:%M UTC", time.gmtime(ts))
+
+
+class UsageLimit:
+    """Account-wide usage-limit state, shared by every chat (the limit is on
+    the Claude account, not on a conversation).
+
+    The advertised reset is an upper bound: buying extra usage lifts the
+    limit immediately. So waiters wake every LIMIT_RETRY_INTERVAL_S to retry
+    their prompt; a retry that still hits the limit is silent, and the first
+    request that gets through clears the limit for all chats at once.
+    """
+
+    def __init__(self):
+        self.until: float = 0.0
+        self._wake = asyncio.Event()
+
+    @property
+    def active(self) -> bool:
+        return time.time() < self.until
+
+    def hit(self, reset_ts: float) -> bool:
+        """Record a limit notice. True if this starts a new limit window (the
+        caller should tell the user); False for a retry that is still limited."""
+        was_active = self.active
+        # Floor: a reset that is already past (stale epoch in the notice)
+        # must not turn the retry loop into a hot loop.
+        self.until = max(self.until, reset_ts, time.time() + 60)
+        return not was_active
+
+    def clear(self):
+        """A request went through (or the user asked to retry): release all
+        waiting chats now."""
+        self.until = 0.0
+        self._wake.set()
+
+    async def wait(self):
+        """Block while the limit is active, for at most one retry interval or
+        until clear() is called — the caller then retries its prompt."""
+        if not self.active:
+            return
+        self._wake.clear()
+        timeout = min(self.until - time.time() + 5, config.LIMIT_RETRY_INTERVAL_S)
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    def describe(self) -> str:
+        every = max(1, round(config.LIMIT_RETRY_INTERVAL_S / 60))
+        return (f"I'll retry every {every} min until it lifts (reset "
+                f"~{fmt_reset(self.until)}, or sooner once usage is topped up); "
+                f"/retry to retry right now")
+
+
+USAGE_LIMIT = UsageLimit()
 
 
 def fmt_cost(usd: float | None) -> str:
@@ -287,15 +343,27 @@ class TelegramIO:
     """Returns "allow" | "deny" | "always"."""
 
 
+RESTART_NOTE = (
+    "[The bot process was restarted while this message was being worked on. "
+    "The session transcript was resumed, so if you had already started, "
+    "continue from where you left off rather than starting over.]")
+
+
 class ChatSession:
     def __init__(self, chat_id: int, state: ChatState, io: TelegramIO,
-                 on_state_change: Callable[[], None]):
+                 on_state_change: Callable[[], None],
+                 on_queue_change: Callable[[], None] = lambda: None):
         self.chat_id = chat_id
         self.state = state
         self.io = io
         self._save = on_state_change
+        self._save_queue = on_queue_change
         self.client: ClaudeSDKClient | None = None
-        self.queue: asyncio.Queue = asyncio.Queue()
+        # Prompts waiting to run, oldest first: (prompt, want_voice). Plus
+        # the one currently running, so the whole backlog can be persisted
+        # and re-submitted after a restart (see ChatManager.pending()).
+        self.queue: collections.deque = collections.deque()
+        self.in_flight: tuple | None = None
         self.worker: asyncio.Task | None = None
         self.busy = False
         self._needs_reconnect = False
@@ -311,10 +379,9 @@ class ChatSession:
         self._turn_done: asyncio.Future | None = None
         self._collected: list[str] = []
         self._turn_started: float = 0.0
-        # Usage-limit backoff: epoch until which prompts are held. Set when a
-        # turn ends in a limit notice; the worker sleeps it out and retries,
-        # so the bot stays responsive (acks + queues) instead of erroring.
-        self.limited_until: float = 0.0
+        # Set when the current turn ends in a usage-limit notice; the worker
+        # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
+        # the bot stays responsive (acks + queues) instead of erroring.
         self._hit_limit = False
 
     # ---------- MCP tools Claude can call to reach the user ----------
@@ -492,57 +559,88 @@ class ChatSession:
 
     def submit(self, prompt, want_voice: bool = False):
         """Queue a prompt (str, or dict for rich content). Starts worker."""
-        self.queue.put_nowait((prompt, want_voice))
-        if time.time() < self.limited_until:
+        self.queue.append((prompt, want_voice))
+        self._save_queue()
+        if USAGE_LIMIT.active:
             asyncio.get_running_loop().create_task(self.io.send_text(
                 self.chat_id,
-                f"⏳ Claude usage limit is active — queued; I'll process this "
-                f"automatically after the reset (~{fmt_reset(self.limited_until)}).",
+                f"⏳ Claude usage limit is active — queued; {USAGE_LIMIT.describe()}.",
                 markdown=False))
         if self.worker is None or self.worker.done():
             self.worker = asyncio.get_running_loop().create_task(self._worker())
-        return self.queue.qsize()
+        return len(self.queue)
 
-    async def _wait_if_limited(self):
-        """Sleep out an active usage-limit window (chunked, so a restart or
-        an earlier-than-advertised reset doesn't strand the queue long)."""
-        while True:
-            wait = self.limited_until - time.time()
-            if wait <= 0:
-                return
-            await asyncio.sleep(min(wait + 5, 300))
+    def pending(self) -> list[dict]:
+        """Everything not yet answered, oldest first, JSON-serialisable."""
+        items = []
+        if self.in_flight is not None:
+            items.append({"prompt": self.in_flight[0], "want_voice": self.in_flight[1],
+                          "in_flight": True})
+        items += [{"prompt": p, "want_voice": v} for p, v in self.queue]
+        return items
+
+    def restore(self, items: list[dict]) -> int:
+        """Re-submit prompts persisted by a previous process. A prompt that
+        was mid-turn is re-sent with a note so Claude continues rather than
+        restarts the work (the transcript itself is resumed by session id)."""
+        for item in items:
+            prompt = item.get("prompt")
+            if prompt is None:
+                continue
+            if item.get("in_flight"):
+                if isinstance(prompt, dict):
+                    prompt = {"content": list(prompt.get("content", []))
+                              + [{"type": "text", "text": RESTART_NOTE}]}
+                else:
+                    prompt = f"{RESTART_NOTE}\n\n{prompt}"
+            self.submit(prompt, bool(item.get("want_voice")))
+        return len(items)
+
+    def _requeue_limited(self, prompt, want_voice):
+        """Put a prompt that hit the usage limit back at the front of the
+        queue so it runs first once the limit lifts, in original order."""
+        self.queue.appendleft((prompt, want_voice))
 
     async def _worker(self):
-        while not self.queue.empty():
-            await self._wait_if_limited()
-            prompt, want_voice = await self.queue.get()
+        while self.queue:
+            # Returns after at most one retry interval even while the limit
+            # is still active: the prompt below doubles as the probe, and a
+            # probe that still hits the limit is re-queued silently.
+            await USAGE_LIMIT.wait()
+            if not self.queue:
+                return
+            prompt, want_voice = self.in_flight = self.queue.popleft()
             self.busy = True
             self._hit_limit = False
+            self._save_queue()
+            shutting_down = False
             try:
                 text = await self._run(prompt)
                 if self._hit_limit:
-                    # The turn died on the usage limit: re-queue the prompt and
-                    # let the loop sleep out the window, then retry it.
-                    self.queue.put_nowait((prompt, want_voice))
+                    self._requeue_limited(prompt, want_voice)
                     continue
                 if want_voice and text:
                     try:
                         await self.io.send_voice_text(self.chat_id, text)
                     except Exception as e:
                         log.warning("TTS failed: %s", e)
+            except asyncio.CancelledError:
+                # Process shutdown: keep the prompt persisted as in-flight so
+                # the next process re-submits it.
+                shutting_down = True
+                raise
             except Exception as e:
                 reset_ts = parse_limit_reset(str(e))
                 if reset_ts:
                     # Limit surfaced as an exception (e.g. connect failure):
                     # same treatment — back off, re-queue, retry.
-                    self.limited_until = max(self.limited_until, reset_ts)
                     self._needs_reconnect = True
-                    self.queue.put_nowait((prompt, want_voice))
-                    await self.io.send_text(
-                        self.chat_id,
-                        f"⏳ Claude usage limit reached — I'll retry "
-                        f"automatically after the reset (~{fmt_reset(self.limited_until)}).",
-                        markdown=False)
+                    self._requeue_limited(prompt, want_voice)
+                    if USAGE_LIMIT.hit(reset_ts):
+                        await self.io.send_text(
+                            self.chat_id,
+                            f"⏳ Claude usage limit reached — {USAGE_LIMIT.describe()}.",
+                            markdown=False)
                     continue
                 log.exception("query failed for chat %s", self.chat_id)
                 self._needs_reconnect = True
@@ -550,6 +648,9 @@ class ChatSession:
                     self.chat_id, f"⚠️ Claude session error: {e}", markdown=False)
             finally:
                 self.busy = False
+                if not shutting_down:
+                    self.in_flight = None
+                    self._save_queue()
 
     async def _run(self, prompt):
         await self._ensure_client()
@@ -576,8 +677,9 @@ class ChatSession:
 
     async def _on_rate_limit(self, info):
         """Surface Claude rate-limit transitions with an ETA. The CLI emits
-        these once per state change, so a warning is shown once, and a
-        rejection sets limited_until so the worker knows how long to wait."""
+        these once per state change, so a warning is shown once. A rejection
+        records the limit account-wide; retries that are still rejected
+        (every reconnect re-emits the event) stay silent."""
         window = (info.rate_limit_type or "usage").replace("_", " ")
         eta = f" · resets ~{fmt_reset(info.resets_at)}" if info.resets_at else ""
         if info.status == "allowed_warning":
@@ -586,12 +688,12 @@ class ChatSession:
             await self.io.status_update(
                 self.chat_id, f"⚠️ approaching Claude {window} limit{used}{eta}")
         elif info.status == "rejected":
-            if info.resets_at:
-                self.limited_until = max(self.limited_until, float(info.resets_at))
-            await self.io.status_update(
-                self.chat_id,
-                f"⏳ Claude {window} limit hit — waiting for the reset{eta}. "
-                f"Messages sent meanwhile are queued.")
+            reset_ts = float(info.resets_at) if info.resets_at else time.time() + 30 * 60
+            if USAGE_LIMIT.hit(reset_ts):
+                await self.io.status_update(
+                    self.chat_id,
+                    f"⏳ Claude {window} limit hit{eta} — "
+                    f"{USAGE_LIMIT.describe()}. Messages sent meanwhile are queued.")
 
     async def _receive_loop(self):
         """Consume and deliver every message the agent produces, for the
@@ -651,17 +753,26 @@ class ChatSession:
             reset_ts = parse_limit_reset(message.result or "")
             if reset_ts:
                 # Usage limit — regardless of subtype. Flag the turn so the
-                # worker re-queues its prompt, and tell the user once with
-                # the reset time instead of surfacing the raw notice.
-                self.limited_until = max(self.limited_until, reset_ts)
+                # worker re-queues its prompt, and tell the user once (a
+                # retry that is still limited stays quiet) with the reset
+                # time instead of surfacing the raw notice.
                 self._hit_limit = True
                 self._needs_reconnect = True
-                await self.io.status_done(
-                    self.chat_id,
-                    f"⏳ Claude usage limit reached — resuming automatically "
-                    f"after the reset (~{fmt_reset(self.limited_until)}). "
-                    f"Messages sent meanwhile are queued.")
+                if USAGE_LIMIT.hit(reset_ts):
+                    await self.io.status_done(
+                        self.chat_id,
+                        f"⏳ Claude usage limit reached — {USAGE_LIMIT.describe()}. "
+                        f"Messages sent meanwhile are queued.")
+                else:
+                    log.info("chat %s: retry still limited until %s",
+                             self.chat_id, fmt_reset(USAGE_LIMIT.until))
             elif message.subtype == "success":
+                if USAGE_LIMIT.active:
+                    # A request got through before the advertised reset (e.g.
+                    # usage was topped up): release every waiting chat now.
+                    USAGE_LIMIT.clear()
+                    log.info("usage limit lifted early (chat %s got through)",
+                             self.chat_id)
                 await self.io.status_done(
                     self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
                 # /compact, /context etc. return their output only in
@@ -702,11 +813,43 @@ class ChatManager:
         data = {str(cid): vars(s) for cid, s in self.states.items()}
         config.STATE_FILE.write_text(json.dumps(data, indent=2))
 
+    def save_pending(self):
+        """Persist every chat's unanswered prompts so a restart (deploy,
+        crash, usage-limit wait) re-submits them instead of dropping them."""
+        data = {str(cid): items for cid, s in self.sessions.items()
+                if (items := s.pending())}
+        tmp = config.PENDING_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(config.PENDING_FILE)
+
+    async def restore_pending(self) -> dict[int, int]:
+        """Re-submit prompts left over by the previous process. Call once,
+        from inside the running event loop. Returns {chat_id: count}."""
+        try:
+            raw = json.loads(config.PENDING_FILE.read_text())
+        except (OSError, ValueError):
+            return {}
+        restored: dict[int, int] = {}
+        for cid, items in raw.items():
+            if not items:
+                continue
+            chat_id = int(cid)
+            n = self.get(chat_id).restore(items)
+            if n:
+                restored[chat_id] = n
+                await self.io.send_text(
+                    chat_id,
+                    f"♻️ Bot restarted — picking up {n} unanswered "
+                    f"message{'s' if n != 1 else ''} from before the restart.",
+                    markdown=False)
+        self.save_pending()
+        return restored
+
     def get(self, chat_id: int) -> ChatSession:
         if chat_id not in self.sessions:
             state = self.states.setdefault(chat_id, ChatState())
             self.sessions[chat_id] = ChatSession(
-                chat_id, state, self.io, self.save)
+                chat_id, state, self.io, self.save, self.save_pending)
         return self.sessions[chat_id]
 
 
