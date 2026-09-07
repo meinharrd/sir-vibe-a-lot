@@ -77,6 +77,18 @@ def fmt_reset(ts: float) -> str:
     return time.strftime("%H:%M UTC", time.gmtime(ts))
 
 
+# Claude Code repairs a transcript whose last turn was interrupted by
+# appending a synthetic user "Continue from where you left off." and this
+# assistant reply, then emits a normal result for the pair on resume.
+SYNTHETIC_REPLY = "No response requested."
+
+
+def _is_synthetic_result(message) -> bool:
+    # Exact-text match only: a false positive here would leave the real
+    # turn's future pending forever, which is worse than the original bug.
+    return (message.result or "").strip() == SYNTHETIC_REPLY
+
+
 class UsageLimit:
     """Account-wide usage-limit state, shared by every chat (the limit is on
     the Claude account, not on a conversation).
@@ -731,6 +743,8 @@ class ChatSession:
                 self.state.active_model = message.model
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text.strip():
+                    if block.text.strip() == SYNTHETIC_REPLY:
+                        continue  # CLI transcript repair, not a reply
                     self._collected.append(block.text)
                     await self.io.send_text(self.chat_id, block.text)
                 elif isinstance(block, ToolUseBlock):
@@ -739,6 +753,15 @@ class ChatSession:
                         self.chat_id,
                         "🔧 " + tool_summary(block.name, block.input or {}))
         elif isinstance(message, ResultMessage):
+            if _is_synthetic_result(message):
+                # Resuming a session whose last turn was cut off (usage
+                # limit, kill) makes the CLI append a synthetic "Continue
+                # from where you left off." / "No response requested." pair
+                # and emit a result for it *before* our prompt runs. Taking
+                # it as the reply marked the real prompt done, cleared the
+                # limit, and lost the prompt when the limit hit again.
+                log.info("chat %s: ignoring synthetic resume result", self.chat_id)
+                return
             if not self._needs_reconnect:
                 # After /cwd (or /model, /mode) marked the client dirty, this
                 # id belongs to the old options — writing it back would undo
