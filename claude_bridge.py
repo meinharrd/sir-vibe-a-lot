@@ -198,6 +198,28 @@ class ChatState:
     always_allowed: list[str] = field(default_factory=list)
     last_cost: float | None = None
     total_cost: float = 0.0
+    context_tokens: int | None = None   # input side of the last API call
+    context_window: int | None = None   # model's window, from the CLI
+
+
+def fmt_tokens(n: int | None) -> str:
+    if n is None:
+        return "?"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def context_line(st: "ChatState") -> str | None:
+    """'331.8k / 1.0M (33%)' like the CLI's /context header, or None."""
+    if not st.context_tokens:
+        return None
+    if st.context_window:
+        pct = round(st.context_tokens * 100 / st.context_window)
+        return f"{fmt_tokens(st.context_tokens)} / {fmt_tokens(st.context_window)} ({pct}%)"
+    return fmt_tokens(st.context_tokens)
 
 
 def _project_dir(cwd: str) -> Path:
@@ -741,6 +763,11 @@ class ChatSession:
         elif isinstance(message, AssistantMessage):
             if message.model:
                 self.state.active_model = message.model
+            u = message.usage or {}
+            ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                   + u.get("cache_creation_input_tokens", 0))
+            if ctx:  # what the model saw on this call = the live context size
+                self.state.context_tokens = ctx
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text.strip():
                     if block.text.strip() == SYNTHETIC_REPLY:
@@ -770,6 +797,10 @@ class ChatSession:
             if message.total_cost_usd is not None:
                 self.state.last_cost = message.total_cost_usd
                 self.state.total_cost += message.total_cost_usd
+            windows = [int(v.get("contextWindow") or 0)
+                       for v in (message.model_usage or {}).values()]
+            if windows and max(windows):
+                self.state.context_window = max(windows)
             self._save()
             elapsed = time.time() - self._turn_started
             cost = fmt_cost(message.total_cost_usd)

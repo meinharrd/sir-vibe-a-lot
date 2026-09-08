@@ -32,7 +32,7 @@ import audio
 import config
 from claude_bridge import (
     MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
-    default_model_setting, fmt_reset, image_prompt, model_aliases,
+    context_line, default_model_setting, fmt_reset, image_prompt, model_aliases,
     resolve_model, _project_dir,
 )
 from formatting import md_to_telegram_html, split_message
@@ -383,6 +383,9 @@ async def cmd_status(update: Update, context):
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
         + (f" · queued: {len(s.queue)}" if s.queue else ""),
     ]
+    ctx = context_line(st)
+    if ctx:
+        lines.insert(3, f"<b>context</b>: {ctx}")
     if USAGE_LIMIT.active:
         lines.append(
             f"<b>usage limit</b>: active — resets ~{fmt_reset(USAGE_LIMIT.until)}, "
