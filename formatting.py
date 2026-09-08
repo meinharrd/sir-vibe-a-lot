@@ -27,8 +27,14 @@ def md_to_telegram_html(text: str) -> str:
         t = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"<i>\1</i>", t)
         t = re.sub(r"(?<![\w_])_([^_\n]+)_(?![\w_])", r"<i>\1</i>", t)
         t = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", t, flags=re.MULTILINE)
+        # Markdown links become "text: url" with the bare URL visible. A
+        # hidden-text anchor from a bot makes every Telegram client show an
+        # "Open this link?" prompt; a plain URL opens directly. If the text
+        # already is the URL, print it once.
         t = re.sub(
-            r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', t
+            r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+            lambda m: m.group(2) if m.group(1).strip() == m.group(2) else f"{m.group(1)}: {m.group(2)}",
+            t,
         )
         t = re.sub(r"^(\s*)[-*]\s+", r"\1• ", t, flags=re.MULTILINE)
         out.append(t)
