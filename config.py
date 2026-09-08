@@ -23,6 +23,9 @@ MEDIA_DIR = DATA_DIR / "media"
 STATE_FILE = DATA_DIR / "state.json"
 # Unanswered prompts (queued + in flight) per chat; re-submitted on startup.
 PENDING_FILE = DATA_DIR / "pending.json"
+# chat ids that get a "continue" prompt right after a restart (written by
+# tools/restart_check.py --continue, consumed once at startup)
+CONTINUE_FILE = DATA_DIR / "continue_after_restart.json"
 
 # systemd unit name, used for self-restart (/restartbot and self-maintenance)
 SERVICE_NAME = os.environ.get("SERVICE_NAME", "sir-vibe-a-lot")

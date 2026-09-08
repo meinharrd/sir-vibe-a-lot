@@ -176,7 +176,17 @@ asks you to change or improve the bot:
 2. Verify it compiles: .venv/bin/python -m py_compile bot.py claude_bridge.py
    audio.py formatting.py config.py login.py
 3. Commit your change to git (so it can be rolled back with git revert).
-4. Tell the user what you changed, then apply it with a DELAYED restart:
+4. Before restarting, run `.venv/bin/python tools/restart_check.py`. It
+   lists chats with a prompt in flight and recently active sessions, and
+   flags those waiting on background work (monitors, wake-ups, background
+   tasks) — a restart kills every Claude subprocess and their watchers. Tell
+   the user what you changed AND what the check found, and ask them to
+   confirm the restart. Only if the check shows no busy and no waiting
+   session may you restart without asking. For every session flagged as
+   waiting, run `tools/restart_check.py --continue <chat id> ...` so the bot
+   sends it a "continue" prompt right after coming back (mid-turn prompts
+   are re-submitted automatically).
+5. Once confirmed, apply the change with a DELAYED restart:
    sudo systemd-run --on-active=5 systemctl restart {config.SERVICE_NAME}
 NEVER run `systemctl restart {config.SERVICE_NAME}` directly - you are running
 inside that service, and an immediate restart kills you before your reply
@@ -381,6 +391,12 @@ RESTART_NOTE = (
     "[The bot process was restarted while this message was being worked on. "
     "The session transcript was resumed, so if you had already started, "
     "continue from where you left off rather than starting over.]")
+
+CONTINUE_NOTE = (
+    "[The bot process was restarted. Background monitors, scheduled wake-ups "
+    "and background tasks from before the restart are gone. Check the real "
+    "state of what you were waiting on and continue from where you left off; "
+    "re-create any watcher you still need.]")
 
 
 class ChatSession:
@@ -875,6 +891,27 @@ class ChatManager:
         tmp = config.PENDING_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
         tmp.replace(config.PENDING_FILE)
+
+    async def continue_after_restart(self) -> list[int]:
+        """Send CONTINUE_NOTE to the chats listed in config.CONTINUE_FILE
+        (sessions that were waiting on background work when the bot went
+        down, which restore_pending() cannot see). Consumed once."""
+        try:
+            chat_ids = [int(c) for c in json.loads(config.CONTINUE_FILE.read_text())]
+        except (OSError, ValueError):
+            return []
+        config.CONTINUE_FILE.unlink(missing_ok=True)
+        done = []
+        for chat_id in chat_ids:
+            session = self.get(chat_id)
+            if session.in_flight is not None or session.queue:
+                continue  # already being re-submitted with RESTART_NOTE
+            session.submit(CONTINUE_NOTE, False)
+            await self.io.send_text(
+                chat_id, "♻️ Bot restarted — asking Claude to pick up its background work.",
+                markdown=False)
+            done.append(chat_id)
+        return done
 
     async def restore_pending(self) -> dict[int, int]:
         """Re-submit prompts left over by the previous process. Call once,

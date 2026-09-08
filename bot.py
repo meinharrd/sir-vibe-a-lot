@@ -947,6 +947,9 @@ async def post_init(app: Application):
     restored = await manager.restore_pending()
     if restored:
         log.info("re-submitted pending prompts after restart: %s", restored)
+    continued = await manager.continue_after_restart()
+    if continued:
+        log.info("sent continue prompts after restart to: %s", continued)
     log.info("Bot ready.")
 
 
