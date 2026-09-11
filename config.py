@@ -49,6 +49,12 @@ PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min
 # (a limit can lift before the advertised reset, e.g. after buying credits).
 LIMIT_RETRY_INTERVAL_S = int(os.environ.get("LIMIT_RETRY_INTERVAL_S", "300"))
 
+# Account routing (router.py): alan's account registry + shared limit state.
+# Sessions are spread over every subscription registered there; when the file
+# is missing, routing is off and sessions use the host login / OAUTH_TOKEN_FILE.
+ALAN_ACCOUNTS = os.environ.get(
+    "ALAN_ACCOUNTS", str(Path.home() / "alan" / "accounts.py"))
+
 # Long-lived OAuth token captured by the /login flow (claude setup-token).
 # When present it is passed to every Claude session via CLAUDE_CODE_OAUTH_TOKEN,
 # taking precedence over the host's ~/.claude login.

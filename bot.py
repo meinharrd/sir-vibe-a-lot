@@ -30,6 +30,7 @@ from telegram.ext import (
 
 import audio
 import config
+import router
 from claude_bridge import (
     MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
     context_line, default_model_setting, fmt_reset, image_prompt, model_aliases,
@@ -57,6 +58,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /status — session info &amp; cost
 /retry — retry queued messages now (e.g. right after topping up usage)
 /model <i>[fable|opus|sonnet|haiku|default|&lt;model-id&gt;]</i> — switch model (no arg: show what each resolves to)
+/account <i>[auto|&lt;name&gt;]</i> — which Claude subscription this chat runs on (no arg: show all)
 /login — log in to a Claude account (OAuth link, no SSH needed)
 /restartbot — restart the bot process (after code changes)
 /help — this message
@@ -378,6 +380,7 @@ async def cmd_status(update: Update, context):
         f"<b>session</b>: <code>{st.session_id or '(none yet)'}</code>",
         f"<b>cwd</b>: <code>{st.cwd}</code>",
         f"<b>model</b>: {_model_line(st)}",
+        f"<b>account</b>: {_account_line(s)}",
         f"<b>permissions</b>: {st.mode}",
         f"<b>voice replies</b>: {st.voice}",
         f"<b>busy</b>: {'yes' if s.busy else 'no'}"
@@ -461,6 +464,41 @@ async def cmd_model(update: Update, context):
     resolved = resolve_model(s.state.model)
     shown = f"{arg} ({resolved})" if resolved and resolved.lower() != arg else arg
     await update.message.reply_text(f"Model set to {shown}. Applies to the next message.")
+
+
+def _account_line(s) -> str:
+    """Which subscription the chat runs on, for /status."""
+    if not router.available():
+        return "host login (routing off)"
+    live = s.account or "chosen on the next message"
+    return f"{live} (pinned)" if s.state.account else f"{live} (auto)"
+
+
+async def cmd_account(update: Update, context):
+    """Show the registered subscriptions, or pin this chat to one."""
+    s = manager.get(update.effective_chat.id)
+    arg = " ".join(context.args).strip().lower()
+    if arg:
+        if not router.available():
+            await update.message.reply_text(
+                f"Account routing is off — {config.ALAN_ACCOUNTS} not found.")
+            return
+        if arg not in ("auto", *router.names()):
+            await update.message.reply_text(
+                "Unknown account. Usage: /account auto | " + " | ".join(router.names()))
+            return
+        s.state.account = None if arg == "auto" else arg
+        s.mark_dirty()
+        manager.save()
+        await update.message.reply_text(
+            "Routing automatically across all subscriptions again."
+            if arg == "auto" else
+            f"This chat is pinned to {arg}. It waits out that account's limits "
+            f"instead of switching (/account auto to undo).")
+        return
+    # a listing is worth one HTTP round-trip per account for fresh usage
+    await asyncio.to_thread(router.refresh_usage)
+    await update.message.reply_text(router.overview(s.state.account, s.account))
 
 
 async def cmd_mode(update: Update, context):
@@ -977,6 +1015,7 @@ def main():
     app.add_handler(CommandHandler("retry", cmd_retry))
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("account", cmd_account))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(CommandHandler("cwd", cmd_cwd))

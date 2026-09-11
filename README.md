@@ -79,6 +79,7 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `/retry` | retry queued messages now while a usage limit is active (e.g. right after topping up) |
 | `/cost` | billing mode and usage totals |
 | `/model fable\|opus\|sonnet\|haiku\|default\|<model-id>` | switch model; with no argument, shows what each alias resolves to |
+| `/account auto\|<name>` | which Claude subscription the chat runs on; with no argument, lists them with their usage and cooldowns |
 | `/mode ask\|auto` | tool permission prompts on/off |
 | `/voice off\|auto\|always` | voice replies |
 | `/cwd <path>` | change Claude's working directory (starts a new session) |
@@ -97,6 +98,26 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `PIPER_VOICE` | `en_US-lessac-medium` | TTS voice |
 | `SERVICE_NAME` | `sir-vibe-a-lot` | systemd unit name (for self-restart) |
 | `LIMIT_RETRY_INTERVAL_S` | `300` | how often queued messages are retried while a Claude usage limit is active (the limit lifts early when usage is topped up) |
+| `ALAN_ACCOUNTS` | `~/alan/accounts.py` | account registry used for routing (see below); routing is off when the file is missing |
+
+## Multiple subscriptions
+
+If [alan](../alan) is installed on the same box, the bot routes its sessions
+over every Claude subscription registered there (`secrets/accounts.toml`) and
+shares alan's limit state (`state/accounts.json`, flock-protected), so the two
+never retry an account the other just found capped. Selection is alan's:
+among the accounts with allowance, the one whose weekly window resets soonest.
+
+When a session walks into a usage limit, the chat moves to another
+subscription and the prompt is retried there instead of waiting for the reset
+(a notice naming a model — "Fable 5 limit" — only parks that model on that
+account). `/account <name>` pins a chat to one subscription; a pinned chat
+waits out its limits instead of switching. With no registry present nothing
+changes: sessions use the host login, or the `/login` token.
+
+Cursor subscriptions (`kind = "cursor"` in alan's registry) are listed but not
+usable here — they run only through the cursor-agent CLI, not the Claude Agent
+SDK this bot speaks.
 
 ## Security notes
 

@@ -1,0 +1,256 @@
+"""Route Claude sessions across several subscriptions.
+
+The bot used to run every session on one login (the host `~/.claude`, or the
+token captured by /login). alan (`/home/ubuntu/alan`) already keeps the
+registry of subscriptions this box may use (`secrets/accounts.toml`) and a
+flock-protected record of which ones are currently capped
+(`state/accounts.json`); its `accounts.py` is stdlib-only, so this module
+loads it by path and reuses both. Sharing that state is the point: an
+account alan capped a minute ago must not be probed again here, and a limit
+this bot walks into parks the account for alan too.
+
+Selection policy, cooldown detection and per-model caps all come from alan
+(see its accounts.py): among accounts with allowance, the one whose 7-day
+window resets soonest wins, so the allowance about to expire is spent first.
+
+`kind = "cursor"` accounts are listed but never picked: they only run through
+the cursor-agent CLI, not the Claude Agent SDK this bridge speaks.
+"""
+import functools
+import importlib.util
+import logging
+import re
+import sys
+import time
+from pathlib import Path
+
+import config
+
+log = logging.getLogger(__name__)
+
+# Families a limit notice can name ("You've reached your Fable 5 limit"),
+# used to record a per-model cap instead of parking the whole subscription.
+_FAMILY_RE = re.compile(r"\b(fable|opus|sonnet|haiku)\b", re.I)
+
+
+@functools.lru_cache(maxsize=1)
+def _alan():
+    """alan's accounts module, or None when it is not installed here."""
+    path = Path(config.ALAN_ACCOUNTS)
+    if not path.is_file():
+        log.info("account routing off: %s not found", path)
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("alan_accounts", path)
+        mod = importlib.util.module_from_spec(spec)
+        # Registered before exec: @dataclass resolves annotations through
+        # sys.modules[cls.__module__] and blows up on a module that is not
+        # there yet.
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+    except Exception:
+        sys.modules.pop("alan_accounts", None)
+        log.exception("could not load alan accounts module from %s", path)
+        return None
+    return mod
+
+
+def available() -> bool:
+    """True when routing is possible (alan's registry has a Claude account)."""
+    return bool(usable())
+
+
+def accounts() -> list:
+    """Every registered account, cursor ones included (they are display-only
+    here). Empty list when routing is unavailable."""
+    mod = _alan()
+    if mod is None:
+        return []
+    try:
+        return mod.load_accounts()
+    except Exception:
+        log.exception("could not read the account registry")
+        return []
+
+
+def usable() -> list:
+    """Accounts this bot can actually run on (Claude logins/tokens)."""
+    return [a for a in accounts() if not a.cursor]
+
+
+def names() -> list[str]:
+    return [a.name for a in usable()]
+
+
+def get(name: str | None):
+    if not name:
+        return None
+    return next((a for a in usable() if a.name == name), None)
+
+
+def env_for(acct) -> dict[str, str]:
+    """Environment that makes the CLI use `acct`.
+
+    A login-dir account gets CLAUDE_CONFIG_DIR, a token account
+    CLAUDE_CODE_OAUTH_TOKEN; the config dir is always spelled out (the
+    account's own, else the host's) and a token is blanked unless the account
+    has one — an inherited token would otherwise win over the config dir and
+    silently run the session on the wrong account. Blanking must not be
+    symmetric: an empty CLAUDE_CODE_OAUTH_TOKEN is ignored by the CLI, but an
+    empty CLAUDE_CONFIG_DIR is taken as a real (empty) path and lands on
+    "Not logged in" (verified against the bundled CLI 2026-09-11).
+    """
+    env = {"CLAUDE_CONFIG_DIR": str(acct.dir), "CLAUDE_CODE_OAUTH_TOKEN": ""}
+    env.update(acct.env())
+    return env
+
+
+def pick(pin: str | None, model: str | None = None):
+    """The account a session should connect on, or None when routing is off.
+
+    A pin is honoured even while the account is capped — the request then
+    doubles as the probe that finds out whether the limit has lifted, which
+    is what the retry loop expects. With no pin and every account capped,
+    the first registered account plays that role.
+    """
+    mod = _alan()
+    if mod is None:
+        return None
+    try:
+        # avoid_cooldown=False: alan would refresh usage over HTTP, and this
+        # runs on the event loop. Snapshots are refreshed in the background
+        # (refresh_usage) and limit marks are written the moment one is hit,
+        # so the cached view is what routing needs anyway.
+        chosen = mod.pick(override=pin, avoid_cooldown=False, model=model)
+    except SystemExit as e:            # unknown pin
+        log.warning("account pin rejected: %s", e)
+        chosen = None
+    except Exception:
+        log.exception("account selection failed")
+        return None
+    if chosen is not None and not chosen.cursor:
+        return chosen
+    return get(pin) or (usable() or [None])[0]
+
+
+def next_account(pin: str | None, model: str | None, current: str | None) -> str | None:
+    """Another subscription with allowance for `model`, or None when the chat
+    should wait out the limit instead (pinned chat, or nothing left)."""
+    if pin or _alan() is None:
+        return None                     # a pin means: this account or wait
+    try:
+        chosen = _alan().pick(override=None, avoid_cooldown=False, model=model)
+    except Exception:
+        log.exception("account selection failed")
+        return None
+    if chosen is None or chosen.cursor or chosen.name == current:
+        return None
+    return chosen.name
+
+
+def limit_family(text: str | None) -> str | None:
+    """The model family a limit notice names ('Fable 5 limit' -> 'fable'), or
+    None for a notice about the account's own window ('5-hour limit reached')."""
+    m = _FAMILY_RE.search(text or "")
+    return m.group(1).lower() if m else None
+
+
+def mark_limited(name: str, until: float, text: str | None = None) -> None:
+    """Record a usage limit hit on `name`. A notice naming a model family caps
+    that family alone (the account keeps serving every other model); anything
+    else parks the account until `until`."""
+    mod = _alan()
+    if mod is None:
+        return
+    try:
+        fam = limit_family(text)
+        if fam:
+            mod.mark_model_limited(name, fam, until, message=text)
+        else:
+            mod.mark_limited(name, until)
+        if text:
+            mod.record_limit_message(name, text, fam,
+                                     scope="model" if fam else "account")
+    except Exception:
+        log.exception("could not record the limit on %s", name)
+
+
+def record_rate_limit(name: str, info, model: str | None = None) -> None:
+    """Hand the CLI's streamed rate-limit event to alan: it keeps the usage
+    picture warm and, for a rejection, opens the right window (account-wide
+    for five_hour/seven_day, per-model for seven_day_opus and friends)."""
+    mod = _alan()
+    if mod is None:
+        return
+    try:
+        mod.record_rate_limit(name, info, model)
+    except Exception:
+        log.exception("could not record the rate-limit event for %s", name)
+
+
+def refresh_usage() -> None:
+    """Refresh every account's usage snapshot (blocking HTTP — call from a
+    thread). alan caches each for 60s, so calling this per connect is cheap."""
+    mod = _alan()
+    if mod is None:
+        return
+    for a in usable():
+        try:
+            mod.refresh_usage(a, timeout=6)
+        except Exception:
+            log.warning("usage refresh failed for %s", a.name, exc_info=True)
+
+
+def _state_line(acct) -> str:
+    """'available' or why the account cannot run right now."""
+    mod = _alan()
+    if acct.cursor:
+        return "cursor-agent only — not usable from this bot"
+    try:
+        until, why = mod.cooldown(acct.name)
+    except Exception:
+        return "unknown"
+    parts = []
+    if until:
+        parts.append(f"{why}, resets {time.strftime('%H:%M UTC', time.gmtime(until))}")
+    else:
+        parts.append("available")
+    try:
+        caps = mod.model_cooldowns(acct.name)
+    except Exception:
+        caps = {}
+    for c in caps.values():
+        parts.append(f"{c['label']} capped until "
+                     f"{time.strftime('%H:%M UTC', time.gmtime(c['until']))}")
+    try:
+        snap = mod._read_state().get(acct.name, {}).get("usage") or {}
+        used = [f"{nm} {w['pct']:.0f}%"
+                for k, nm in (("five_hour", "5h"), ("seven_day", "7d"))
+                if (w := snap.get(k)) and w.get("pct") is not None]
+        if used:
+            parts.append(" · ".join(used))
+    except Exception:
+        pass
+    return ", ".join(parts)
+
+
+def overview(pin: str | None, current: str | None) -> str:
+    """Multi-line account listing for /account and /status (plain text)."""
+    if _alan() is None:
+        return (f"Account routing is off — {config.ALAN_ACCOUNTS} not found.\n"
+                "Sessions run on the host Claude login (or the /login token).")
+    lines = ["Subscriptions (registry and limit state shared with alan):"]
+    for a in accounts():
+        marks = []
+        if a.name == current:
+            marks.append("this chat")
+        if a.name == pin:
+            marks.append("pinned")
+        tag = f"  ← {', '.join(marks)}" if marks else ""
+        label = f" ({a.label})" if a.label != a.name else ""
+        lines.append(f"• {a.name}{label} — {_state_line(a)}{tag}")
+    lines.append("")
+    lines.append(f"Routing: {'pinned to ' + pin if pin else 'auto'} "
+                 "(soonest weekly reset first; switches on a usage limit)")
+    lines.append("Usage: /account auto | " + " | ".join(names()))
+    return "\n".join(lines)

@@ -31,6 +31,7 @@ from claude_agent_sdk import (
 )
 
 import config
+import router
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ class ChatState:
     model: str | None = None        # what the user requested (None = default)
     active_model: str | None = None  # actual model id reported by the SDK
     mode: str = "auto"          # "ask" | "auto"
+    account: str | None = None  # subscription pin (None = route automatically)
     voice: str = "off"          # "off" | "auto" | "always"
     always_allowed: list[str] = field(default_factory=list)
     last_cost: float | None = None
@@ -433,6 +435,12 @@ class ChatSession:
         # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
         # the bot stays responsive (acks + queues) instead of erroring.
         self._hit_limit = False
+        # Subscription the connected client runs on (router.pick), and the
+        # one a usage limit moved this chat to during the current turn (so a
+        # limit reported twice — rate-limit event *and* result text — is
+        # announced once).
+        self.account: str | None = None
+        self._switched_to: str | None = None
 
     # ---------- MCP tools Claude can call to reach the user ----------
 
@@ -502,9 +510,15 @@ class ChatSession:
     def _build_options(self) -> ClaudeAgentOptions:
         ask = self.state.mode == "ask"
         env = {}
-        token = config.load_oauth_token()
-        if token:  # from the /login flow — overrides the host's ~/.claude login
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        acct = router.pick(self.state.account, resolve_model(self.state.model))
+        if acct is not None:  # one of the registered subscriptions (router.py)
+            self.account = acct.name
+            env.update(router.env_for(acct))
+        else:
+            self.account = None
+            token = config.load_oauth_token()
+            if token:  # from the /login flow — overrides the host's ~/.claude login
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         return ClaudeAgentOptions(
             env=env,
             cwd=self.state.cwd,
@@ -545,6 +559,10 @@ class ChatSession:
                     "⚠️ The previous session's transcript is missing for this "
                     "working directory — starting a fresh session.",
                     markdown=False)
+            # Keeps the snapshots routing reads warm without blocking the
+            # connect on two HTTP calls (alan caches each for 60s).
+            asyncio.get_running_loop().create_task(
+                asyncio.to_thread(router.refresh_usage))
             self.client = ClaudeSDKClient(options=self._build_options())
             await self.client.connect()
             self._needs_reconnect = False
@@ -662,6 +680,7 @@ class ChatSession:
             prompt, want_voice = self.in_flight = self.queue.popleft()
             self.busy = True
             self._hit_limit = False
+            self._switched_to = None
             self._save_queue()
             shutting_down = False
             try:
@@ -686,11 +705,7 @@ class ChatSession:
                     # same treatment — back off, re-queue, retry.
                     self._needs_reconnect = True
                     self._requeue_limited(prompt, want_voice)
-                    if USAGE_LIMIT.hit(reset_ts):
-                        await self.io.send_text(
-                            self.chat_id,
-                            f"⏳ Claude usage limit reached — {USAGE_LIMIT.describe()}.",
-                            markdown=False)
+                    await self._limit_hit(reset_ts, text=str(e))
                     continue
                 log.exception("query failed for chat %s", self.chat_id)
                 self._needs_reconnect = True
@@ -725,11 +740,49 @@ class ChatSession:
             if self._turn_done is fut:
                 self._turn_done = None
 
+    async def _limit_hit(self, reset_ts: float, *, text: str | None = None,
+                         info=None, what: str = "usage limit",
+                         done: bool = False) -> None:
+        """A usage limit was reported. Record it against the subscription that
+        hit it (per-model when the notice names a model family, so the account
+        keeps serving every other one) and move the chat to another
+        subscription that still has allowance — the worker re-queues the
+        prompt, so it simply runs there. Only when nothing is left to switch
+        to does the limit become account-wide for every chat (USAGE_LIMIT) and
+        the prompt waits for the reset. A chat pinned with /account never
+        switches; it waits."""
+        model = self.state.active_model or resolve_model(self.state.model)
+        if self.account:
+            if info is not None:
+                router.record_rate_limit(self.account, info, model)
+            else:
+                router.mark_limited(self.account, reset_ts, text)
+        say = self.io.status_done if done else self.io.status_update
+        nxt = router.next_account(self.state.account, model, self.account)
+        if nxt:
+            self._needs_reconnect = True
+            if self._switched_to != nxt:
+                self._switched_to = nxt
+                await say(self.chat_id,
+                          f"🔀 {self.account} hit its {what} — retrying on {nxt}.")
+            else:
+                log.info("chat %s: still limited, switch to %s already announced",
+                         self.chat_id, nxt)
+            return
+        if USAGE_LIMIT.hit(reset_ts):
+            await say(self.chat_id,
+                      f"⏳ Claude {what} reached — {USAGE_LIMIT.describe()}. "
+                      f"Messages sent meanwhile are queued.")
+        else:
+            log.info("chat %s: retry still limited until %s",
+                     self.chat_id, fmt_reset(USAGE_LIMIT.until))
+
     async def _on_rate_limit(self, info):
         """Surface Claude rate-limit transitions with an ETA. The CLI emits
         these once per state change, so a warning is shown once. A rejection
-        records the limit account-wide; retries that are still rejected
-        (every reconnect re-emits the event) stay silent."""
+        goes to _limit_hit, which moves the chat to another subscription or —
+        with none left — parks every chat until the reset; retries that are
+        still rejected (every reconnect re-emits the event) stay silent."""
         window = (info.rate_limit_type or "usage").replace("_", " ")
         eta = f" · resets ~{fmt_reset(info.resets_at)}" if info.resets_at else ""
         if info.status == "allowed_warning":
@@ -739,11 +792,7 @@ class ChatSession:
                 self.chat_id, f"⚠️ approaching Claude {window} limit{used}{eta}")
         elif info.status == "rejected":
             reset_ts = float(info.resets_at) if info.resets_at else time.time() + 30 * 60
-            if USAGE_LIMIT.hit(reset_ts):
-                await self.io.status_update(
-                    self.chat_id,
-                    f"⏳ Claude {window} limit hit{eta} — "
-                    f"{USAGE_LIMIT.describe()}. Messages sent meanwhile are queued.")
+            await self._limit_hit(reset_ts, info=info, what=f"{window} limit")
 
     async def _receive_loop(self):
         """Consume and deliver every message the agent produces, for the
@@ -828,14 +877,7 @@ class ChatSession:
                 # time instead of surfacing the raw notice.
                 self._hit_limit = True
                 self._needs_reconnect = True
-                if USAGE_LIMIT.hit(reset_ts):
-                    await self.io.status_done(
-                        self.chat_id,
-                        f"⏳ Claude usage limit reached — {USAGE_LIMIT.describe()}. "
-                        f"Messages sent meanwhile are queued.")
-                else:
-                    log.info("chat %s: retry still limited until %s",
-                             self.chat_id, fmt_reset(USAGE_LIMIT.until))
+                await self._limit_hit(reset_ts, text=message.result, done=True)
             elif message.subtype == "success":
                 if USAGE_LIMIT.active:
                     # A request got through before the advertised reset (e.g.
