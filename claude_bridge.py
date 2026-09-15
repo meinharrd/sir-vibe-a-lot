@@ -52,7 +52,16 @@ def parse_limit_reset(text: str | None) -> float | None:
     """Epoch seconds when `text` is a usage-limit notice, else None.
     Times without a date are interpreted as the next occurrence in UTC
     (the notices render UTC on this host). Unparseable reset → +30 min."""
-    if not text or not _LIMIT_RE.search(text):
+    if not text:
+        return None
+    # alan's classifier knows every wording the CLI actually uses, including
+    # the per-model cap ("You've reached your Fable limit") that the pattern
+    # list below misses — that notice read as an ordinary reply, so the chat
+    # never switched account and the user got the raw notice as the answer
+    # (chat -5569527484, 2026-09-15).
+    if (hit := router.classify_limit(text)) is not None:
+        return hit[2]
+    if not _LIMIT_RE.search(text):
         return None
     now = time.time()
     m = _RESET_EPOCH_RE.search(text)
@@ -74,6 +83,19 @@ def parse_limit_reset(text: str | None) -> float | None:
     return now + 30 * 60
 
 
+def result_limit_reset(message) -> float | None:
+    """The reset of the usage limit a ResultMessage carries, or None.
+
+    Only an *error* result can be one: a successful turn whose text merely
+    quotes a limit notice — this bot explaining its own limit handling, a
+    /status about a capped account — must not park the chat. alan hit exactly
+    that false positive on 2026-09-09."""
+    if not (message.is_error
+            or (getattr(message, "subtype", "success") or "success") != "success"):
+        return None
+    return parse_limit_reset(message.result)
+
+
 def fmt_reset(ts: float) -> str:
     return time.strftime("%H:%M UTC", time.gmtime(ts))
 
@@ -82,6 +104,10 @@ def fmt_reset(ts: float) -> str:
 # appending a synthetic user "Continue from where you left off." and this
 # assistant reply, then emits a normal result for the pair on resume.
 SYNTHETIC_REPLY = "No response requested."
+# What the CLI reports as the model of a transcript-repair turn. Recording it
+# leaves /status showing "<synthetic>" and routing without a model to skip
+# capped accounts by.
+SYNTHETIC_MODEL = "<synthetic>"
 
 
 def _is_synthetic_result(message) -> bool:
@@ -751,7 +777,11 @@ class ChatSession:
         to does the limit become account-wide for every chat (USAGE_LIMIT) and
         the prompt waits for the reset. A chat pinned with /account never
         switches; it waits."""
-        model = self.state.active_model or resolve_model(self.state.model)
+        # The family the notice itself names wins over what the chat thinks it
+        # is running: a "Fable limit" is routed around Fable even when
+        # active_model is stale.
+        model = (router.limit_family(text) or self.state.active_model
+                 or resolve_model(self.state.model))
         if self.account:
             if info is not None:
                 router.record_rate_limit(self.account, info, model)
@@ -818,7 +848,7 @@ class ChatSession:
                 if sid and not self._needs_reconnect:
                     self.state.session_id = sid
                 active = message.data.get("model")
-                if active:
+                if active and active != SYNTHETIC_MODEL:
                     self.state.active_model = active
                 self._save()
             elif message.subtype == "compact_boundary":
@@ -826,7 +856,7 @@ class ChatSession:
         elif isinstance(message, RateLimitEvent):
             await self._on_rate_limit(message.rate_limit_info)
         elif isinstance(message, AssistantMessage):
-            if message.model:
+            if message.model and message.model != SYNTHETIC_MODEL:
                 self.state.active_model = message.model
             u = message.usage or {}
             ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
@@ -869,7 +899,7 @@ class ChatSession:
             self._save()
             elapsed = time.time() - self._turn_started
             cost = fmt_cost(message.total_cost_usd)
-            reset_ts = parse_limit_reset(message.result or "")
+            reset_ts = result_limit_reset(message)
             if reset_ts:
                 # Usage limit — regardless of subtype. Flag the turn so the
                 # worker re-queues its prompt, and tell the user once (a

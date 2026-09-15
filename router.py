@@ -55,6 +55,51 @@ def _alan():
     return mod
 
 
+@functools.lru_cache(maxsize=1)
+def _alan_core():
+    """alan's main module (for its limit classifier), or None.
+
+    Loaded lazily — it pulls in the Agent SDK — and only once the bot has to
+    read a limit notice. alan's own `accounts` import is bound to the module
+    this router already uses, so both sides share one registry object rather
+    than loading a second copy of it.
+    """
+    mod = _alan()
+    if mod is None:
+        return None
+    path = Path(config.ALAN_ACCOUNTS).with_name("alan.py")
+    if not path.is_file():
+        return None
+    try:
+        sys.modules.setdefault("accounts", mod)
+        spec = importlib.util.spec_from_file_location("alan_core", path)
+        core = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = core
+        spec.loader.exec_module(core)
+    except Exception:
+        sys.modules.pop("alan_core", None)
+        log.exception("could not load alan's limit classifier from %s", path)
+        return None
+    return core
+
+
+def classify_limit(text: str | None, model: str | None = None):
+    """alan's reading of a limit notice: (scope, model, reset_epoch), or None
+    when `text` is not one. It knows the wordings this bot's own regex misses
+    — above all the per-model cap ("You've reached your Fable limit"), which
+    reads as an ordinary reply to the old pattern list and so never triggered
+    a switch. Returns None when alan is not installed; the caller falls back
+    to its own patterns."""
+    core = _alan_core()
+    if core is None:
+        return None
+    try:
+        return core.classify_limit(text, model)
+    except Exception:
+        log.exception("alan's limit classifier failed on %r", (text or "")[:120])
+        return None
+
+
 def available() -> bool:
     """True when routing is possible (alan's registry has a Claude account)."""
     return bool(usable())
