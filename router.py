@@ -133,6 +133,26 @@ def get(name: str | None):
     return next((a for a in usable() if a.name == name), None)
 
 
+def resolve(name: str | None) -> str | None:
+    """The registered slug for a name typed in a chat ('Solar Dev', 'solar
+    dev', 'SOLAR-DEV' -> 'solar-dev'), or the input unchanged when no account
+    matches. Pins are always stored as slugs."""
+    mod = _alan()
+    if mod is None or not name:
+        return name
+    try:
+        return mod.resolve(name)
+    except Exception:
+        log.exception("could not resolve the account name %r", name)
+        return name
+
+
+def title(name: str | None) -> str | None:
+    """How to spell an account in a message ('solar-dev' -> 'Solar Dev')."""
+    a = get(name)
+    return a.title if a is not None else name
+
+
 def env_for(acct) -> dict[str, str]:
     """Environment that makes the CLI use `acct`.
 
@@ -312,8 +332,9 @@ def overview(pin: str | None, current: str | None) -> str:
         if a.name == pin:
             marks.append("pinned")
         tag = f"  ← {', '.join(marks)}" if marks else ""
-        label = f" ({a.label})" if a.label != a.name else ""
-        lines.append(f"• {a.name}{label} — {_state_line(a)}{tag}")
+        label = f" ({a.label})" if a.label != a.title else ""
+        slug = f" · /account {a.name}" if a.title != a.name else ""
+        lines.append(f"• {a.title}{label}{slug} — {_state_line(a)}{tag}")
     lines.append("")
     lines.append(f"Routing: {'pinned to ' + pin if pin else 'auto'} "
                  "(soonest weekly reset first; switches on a usage limit)")

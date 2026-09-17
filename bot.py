@@ -470,7 +470,7 @@ def _account_line(s) -> str:
     """Which subscription the chat runs on, for /status."""
     if not router.available():
         return "host login (routing off)"
-    live = s.account or "chosen on the next message"
+    live = router.title(s.account) or "chosen on the next message"
     return f"{live} (pinned)" if s.state.account else f"{live} (auto)"
 
 
@@ -483,10 +483,9 @@ async def cmd_account(update: Update, context):
             await update.message.reply_text(
                 f"Account routing is off — {config.ALAN_ACCOUNTS} not found.")
             return
-        # Account names are free text ("Solar Dev"), so match them the way a
-        # chat types them — any case — and pin the registered spelling.
-        canon = {n.lower(): n for n in router.names()}
-        arg = canon.get(arg.lower(), "auto" if arg.lower() == "auto" else arg)
+        # Accounts are keyed by slug ('solar-dev') but wear a display name
+        # ('Solar Dev'); a chat may type either, in any case.
+        arg = "auto" if arg.lower() == "auto" else router.resolve(arg)
         if arg not in ("auto", *router.names()):
             await update.message.reply_text(
                 "Unknown account. Usage: /account auto | " + " | ".join(router.names()))
@@ -497,7 +496,7 @@ async def cmd_account(update: Update, context):
         await update.message.reply_text(
             "Routing automatically across all subscriptions again."
             if arg == "auto" else
-            f"This chat is pinned to {arg}. It waits out that account's limits "
+            f"This chat is pinned to {router.title(arg)}. It waits out that account's limits "
             f"instead of switching (/account auto to undo).")
         return
     # a listing is worth one HTTP round-trip per account for fresh usage

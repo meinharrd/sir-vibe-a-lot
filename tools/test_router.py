@@ -9,7 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import router, claude_bridge as cb
 
 mod = router._alan()
-# The two subscriptions this box has registered, whatever they are named.
+# The two subscriptions this box has registered, whatever their slugs are.
 A, B = router.names()[:2]
 tmp = pathlib.Path(tempfile.mkdtemp())
 mod.STATE_FILE = tmp / "accounts.json"
@@ -37,7 +37,7 @@ async def main():
     await s._limit_hit(soon, text="5-hour limit reached · resets 3am")
     assert s._switched_to == B, s._switched_to
     assert s._needs_reconnect and not cb.USAGE_LIMIT.active
-    assert f"retrying on {B}" in io.msgs[0], io.msgs
+    assert f"retrying on {router.title(B)}" in io.msgs[0], io.msgs
     print("1 switch:", io.msgs[0])
 
     # the same limit reported twice in a turn is announced once

@@ -794,7 +794,8 @@ class ChatSession:
             if self._switched_to != nxt:
                 self._switched_to = nxt
                 await say(self.chat_id,
-                          f"🔀 {self.account} hit its {what} — retrying on {nxt}.")
+                          f"🔀 {router.title(self.account)} hit its {what} — "
+                          f"retrying on {router.title(nxt)}.")
             else:
                 log.info("chat %s: still limited, switch to %s already announced",
                          self.chat_id, nxt)
