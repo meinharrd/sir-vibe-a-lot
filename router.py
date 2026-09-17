@@ -156,7 +156,9 @@ def pick(pin: str | None, model: str | None = None):
     A pin is honoured even while the account is capped — the request then
     doubles as the probe that finds out whether the limit has lifted, which
     is what the retry loop expects. With no pin and every account capped,
-    the first registered account plays that role.
+    the first registered account that is not held in reserve plays that role
+    (an account keeping a model's allowance for the user is the last one to
+    probe with — see alan's accounts.reserved()).
     """
     mod = _alan()
     if mod is None:
@@ -175,7 +177,21 @@ def pick(pin: str | None, model: str | None = None):
         return None
     if chosen is not None and not chosen.cursor:
         return chosen
-    return get(pin) or (usable() or [None])[0]
+    return get(pin) or _fallback()
+
+
+def _fallback():
+    """The account to probe with when every one of them is capped: the first
+    registered one, but a reserved account only if it is the only one left."""
+    free = usable()
+    if not free:
+        return None
+    mod = _alan()
+    try:
+        spare = [a for a in free if mod.reserved(a.name)[0] is None]
+    except Exception:            # older alan without reserved()
+        spare = free
+    return (spare or free)[0]
 
 
 def next_account(pin: str | None, model: str | None, current: str | None) -> str | None:
@@ -257,7 +273,11 @@ def _state_line(acct) -> str:
         return "unknown"
     parts = []
     if until:
-        parts.append(f"{why}, resets {time.strftime('%H:%M UTC', time.gmtime(until))}")
+        when = time.strftime('%H:%M UTC', time.gmtime(until))
+        # A reserved account is not out of quota: it is kept free for the
+        # user until a day before its reserved window resets.
+        held = mod.reserved(acct.name)[0] if hasattr(mod, "reserved") else None
+        parts.append(f"{why}, {'free again' if held else 'resets'} {when}")
     else:
         parts.append("available")
     try:

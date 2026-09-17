@@ -477,12 +477,16 @@ def _account_line(s) -> str:
 async def cmd_account(update: Update, context):
     """Show the registered subscriptions, or pin this chat to one."""
     s = manager.get(update.effective_chat.id)
-    arg = " ".join(context.args).strip().lower()
+    arg = " ".join(context.args).strip()
     if arg:
         if not router.available():
             await update.message.reply_text(
                 f"Account routing is off — {config.ALAN_ACCOUNTS} not found.")
             return
+        # Account names are free text ("Solar Dev"), so match them the way a
+        # chat types them — any case — and pin the registered spelling.
+        canon = {n.lower(): n for n in router.names()}
+        arg = canon.get(arg.lower(), "auto" if arg.lower() == "auto" else arg)
         if arg not in ("auto", *router.names()):
             await update.message.reply_text(
                 "Unknown account. Usage: /account auto | " + " | ".join(router.names()))
