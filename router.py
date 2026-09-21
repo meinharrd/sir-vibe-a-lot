@@ -308,6 +308,17 @@ def _state_line(acct) -> str:
         parts.append(f"{c['label']} capped until "
                      f"{time.strftime('%H:%M UTC', time.gmtime(c['until']))}")
     try:
+        # the login's own deadline: refreshes keep the access token alive but
+        # never extend it, so this is the one line that needs a human
+        exp = mod.account_login_expiry(acct)
+        if exp:
+            left = exp - time.time()
+            when = time.strftime("%d %b", time.gmtime(exp))
+            parts.append(f"login {'⚠️ ' if left <= mod.RELOGIN_WARN_SEC else ''}"
+                         f"{left / 86400:.0f}d left (until {when})")
+    except Exception:
+        pass
+    try:
         snap = mod._read_state().get(acct.name, {}).get("usage") or {}
         used = [f"{nm} {w['pct']:.0f}%"
                 for k, nm in (("five_hour", "5h"), ("seven_day", "7d"))
