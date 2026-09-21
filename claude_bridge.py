@@ -283,9 +283,26 @@ def _cli_path() -> str | None:
     return str(local) if local.is_file() else None
 
 
-@functools.lru_cache(maxsize=1)
-def cli_version() -> str | None:
+def _cli_stamp() -> tuple:
+    """Identity of the binary on disk: path, mtime and size. Cache keys hang
+    off this so an SDK upgrade (a new bundled CLI, and with it a new `fable`
+    -> model mapping) takes effect on the next message instead of waiting for
+    a restart of this process."""
     path = _cli_path()
+    try:
+        st = os.stat(path)
+        return (path, st.st_mtime_ns, st.st_size)
+    except (OSError, TypeError):
+        return (path, 0, 0)
+
+
+def cli_version() -> str | None:
+    return _cli_version(_cli_stamp())
+
+
+@functools.lru_cache(maxsize=4)
+def _cli_version(stamp: tuple) -> str | None:
+    path = stamp[0]
     if not path:
         return None
     try:
@@ -297,8 +314,14 @@ def cli_version() -> str | None:
     return out.split()[0] if out else None  # "2.1.257 (Claude Code)" -> "2.1.257"
 
 
-@functools.lru_cache(maxsize=1)
 def model_aliases() -> dict[str, str]:
+    """What each short alias (fable/opus/sonnet/haiku) resolves to, for the
+    binary that is on disk right now."""
+    return _model_aliases(_cli_stamp())
+
+
+@functools.lru_cache(maxsize=4)
+def _model_aliases(stamp: tuple) -> dict[str, str]:
     """What each short alias (fable/opus/sonnet/haiku) resolves to.
 
     Aliases are resolved client-side inside the Claude Code binary, so the
@@ -307,7 +330,7 @@ def model_aliases() -> dict[str, str]:
     env vars override the built-in mapping, as they do in the CLI.
     """
     table: dict[str, str] = {}
-    path = _cli_path()
+    path = stamp[0]
     if path:
         # A regex over the ~200 MB binary takes seconds; a literal find for the
         # rare `:"claude-` marker and a local match around each hit is fast.
