@@ -12,9 +12,6 @@ this bot walks into parks the account for alan too.
 Selection policy, cooldown detection and per-model caps all come from alan
 (see its accounts.py): among accounts with allowance, the one whose 7-day
 window resets soonest wins, so the allowance about to expire is spent first.
-
-`kind = "cursor"` accounts are listed but never picked: they only run through
-the cursor-agent CLI, not the Claude Agent SDK this bridge speaks.
 """
 import functools
 import importlib.util
@@ -106,8 +103,7 @@ def available() -> bool:
 
 
 def accounts() -> list:
-    """Every registered account, cursor ones included (they are display-only
-    here). Empty list when routing is unavailable."""
+    """Every registered account. Empty list when routing is unavailable."""
     mod = _alan()
     if mod is None:
         return []
@@ -120,7 +116,7 @@ def accounts() -> list:
 
 def usable() -> list:
     """Accounts this bot can actually run on (Claude logins/tokens)."""
-    return [a for a in accounts() if not a.cursor]
+    return list(accounts())
 
 
 def names() -> list[str]:
@@ -195,7 +191,7 @@ def pick(pin: str | None, model: str | None = None):
     except Exception:
         log.exception("account selection failed")
         return None
-    if chosen is not None and not chosen.cursor:
+    if chosen is not None:
         return chosen
     return get(pin) or _fallback()
 
@@ -224,7 +220,7 @@ def next_account(pin: str | None, model: str | None, current: str | None) -> str
     except Exception:
         log.exception("account selection failed")
         return None
-    if chosen is None or chosen.cursor or chosen.name == current:
+    if chosen is None or chosen.name == current:
         return None
     return chosen.name
 
@@ -285,8 +281,6 @@ def refresh_usage() -> None:
 def _state_line(acct) -> str:
     """'available' or why the account cannot run right now."""
     mod = _alan()
-    if acct.cursor:
-        return "cursor-agent only — not usable from this bot"
     try:
         until, why = mod.cooldown(acct.name)
     except Exception:
