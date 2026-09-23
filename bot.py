@@ -2,6 +2,7 @@
 import asyncio
 import html
 import logging
+import random
 import subprocess
 import tempfile
 import time
@@ -16,7 +17,7 @@ from telegram import (
     BotCommand,
 )
 from telegram.constants import ChatAction, ChatMemberStatus, ChatType
-from telegram.error import BadRequest, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -92,15 +93,32 @@ class TgIO(TelegramIO):
                 await self._send_retrying(
                     chat_id, chunk if not markdown else text[:4000])
 
+    # How long to wait before retry N of a failed connection to Telegram.
+    # Capped so a chat is never silent for minutes while the API is down;
+    # the jitter keeps every chat in a multi-chat bot from retrying in step.
+    NET_RETRIES = 5
+
+    @staticmethod
+    def _net_backoff(attempt: int) -> float:
+        return min(2.0 ** attempt, 8.0) + random.uniform(0, 0.5)
+
     async def _send_retrying(self, chat_id: int, text: str, **kw):
-        """send_message that waits out Telegram flood control / timeouts.
+        """send_message that waits out Telegram flood control, timeouts and
+        transient connection failures.
 
         Only formatting errors (BadRequest) propagate to the caller; a
         RetryAfter that escaped here used to kill the chat's receiver task
-        and drop the rest of Claude's reply."""
+        and drop the rest of Claude's reply. A single failed connection to
+        api.telegram.org did the same (seen 2026-09-23 10:43 UTC: one
+        httpx.ConnectError surfaced in the chat as "Claude session error"
+        and lost the turn, though Claude had answered fine).
+
+        BadRequest subclasses NetworkError in PTB, so it has to be re-raised
+        before the connection branch or send_text()'s formatting fallback
+        would never run."""
         waited = 0.0
         told = False
-        for attempt in range(5):
+        for attempt in range(self.NET_RETRIES):
             try:
                 msg = await self.app.bot.send_message(chat_id, text, **kw)
                 break
@@ -118,8 +136,16 @@ class TgIO(TelegramIO):
                              f"(resumes ~{eta})") or told
                 await asyncio.sleep(delay)
                 waited += delay
-            except TimedOut:
-                await asyncio.sleep(2 * (attempt + 1))
+            except BadRequest:
+                raise          # formatting: send_text() retries as plain text
+            except NetworkError as e:
+                # Covers TimedOut and the httpx ConnectError/ReadError family
+                # PTB wraps as NetworkError.
+                delay = self._net_backoff(attempt)
+                log.warning("chat %s: %s sending message (attempt %d/%d), "
+                            "retrying in %.1fs", chat_id, type(e).__name__,
+                            attempt + 1, self.NET_RETRIES, delay)
+                await asyncio.sleep(delay)
         else:
             msg = await self.app.bot.send_message(chat_id, text, **kw)
         if waited >= 5 and not told:
@@ -149,13 +175,38 @@ class TgIO(TelegramIO):
         except Exception:
             return False
 
+    async def _upload_retrying(self, chat_id: int, what: str, send, path: str,
+                               caption: str = ""):
+        """An upload that survives a transient connection failure, like
+        _send_retrying does for text. `send` is the bound bot method; the
+        file is re-opened per attempt because a partly-read handle cannot be
+        replayed."""
+        for attempt in range(self.NET_RETRIES):
+            try:
+                with open(path, "rb") as f:
+                    return await send(chat_id, f, caption=caption[:1000] or None)
+            except RetryAfter as e:
+                ra = e.retry_after
+                delay = (ra.total_seconds() if hasattr(ra, "total_seconds")
+                         else float(ra)) + 0.5
+            except BadRequest:
+                raise          # a rejected file does not get better on retry
+            except NetworkError as e:
+                delay = self._net_backoff(attempt)
+                log.warning("chat %s: %s sending %s (attempt %d/%d), retrying "
+                            "in %.1fs", chat_id, type(e).__name__, what,
+                            attempt + 1, self.NET_RETRIES, delay)
+            await asyncio.sleep(delay)
+        with open(path, "rb") as f:   # last try: let the error reach the caller
+            return await send(chat_id, f, caption=caption[:1000] or None)
+
     async def send_photo(self, chat_id: int, path: str, caption: str = ""):
-        with open(path, "rb") as f:
-            await self.app.bot.send_photo(chat_id, f, caption=caption[:1000] or None)
+        await self._upload_retrying(chat_id, "photo", self.app.bot.send_photo,
+                                    path, caption)
 
     async def send_file(self, chat_id: int, path: str, caption: str = ""):
-        with open(path, "rb") as f:
-            await self.app.bot.send_document(chat_id, f, caption=caption[:1000] or None)
+        await self._upload_retrying(chat_id, "document",
+                                    self.app.bot.send_document, path, caption)
 
     async def send_voice_text(self, chat_id: int, text: str):
         spoken = audio.speakable(text)
@@ -166,8 +217,8 @@ class TgIO(TelegramIO):
             ogg = tmp.name
         try:
             await audio.synthesize_voice(spoken, ogg)
-            with open(ogg, "rb") as f:
-                await self.app.bot.send_voice(chat_id, f)
+            await self._upload_retrying(chat_id, "voice",
+                                        self.app.bot.send_voice, ogg)
         finally:
             Path(ogg).unlink(missing_ok=True)
 
