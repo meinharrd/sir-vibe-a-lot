@@ -318,7 +318,9 @@ async def cmd_new(update: Update, context):
     session = manager.get(update.effective_chat.id)
     await session.reset()
     await _deactivate_resume_msg(context.bot, update.effective_chat.id)
-    await update.message.reply_text("🆕 Fresh session started.")
+    await asyncio.to_thread(model_aliases)  # first call scans the CLI binary
+    await update.message.reply_text(
+        f"🆕 Fresh session started.\nModel: {_model_line(session.state)}")
 
 
 def _fmt_age(seconds: float) -> str:
