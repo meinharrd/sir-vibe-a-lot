@@ -854,7 +854,35 @@ async def cmd_restartbot(update: Update, context):
          "systemctl", "restart", config.SERVICE_NAME])
 
 
+def _reply_context(msg) -> str:
+    """Describe the message `msg` replies to, so Claude sees what the user
+    is responding to. Empty when `msg` isn't a reply."""
+    replied = msg.reply_to_message
+    if replied is None:
+        return ""
+    # A Telegram quote (highlighted part of the replied message) wins.
+    text = (msg.quote.text if msg.quote else None) \
+        or replied.text or replied.caption or ""
+    if not text:
+        kind = next((k for k in ("photo", "voice", "audio", "video",
+                                 "document", "sticker")
+                     if getattr(replied, k, None)), "message")
+        text = f"<{kind} without text>"
+    if len(text) > 3000:
+        text = text[:3000] + " …"
+    who = ("your earlier message"
+           if replied.from_user and replied.from_user.is_bot
+           else "an earlier message")
+    return f"[The user is replying to {who}:\n{text}\n]\n\n"
+
+
 def _submit(update: Update, prompt, was_voice: bool = False):
+    if ctx := _reply_context(update.message):
+        if isinstance(prompt, dict):
+            block = prompt["content"][-1]
+            block["text"] = ctx + block["text"]
+        elif not prompt.startswith("/"):  # keep slash commands intact
+            prompt = ctx + prompt
     chat_id = update.effective_chat.id
     session = manager.get(chat_id)
     want_voice = (session.state.voice == "always"
