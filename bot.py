@@ -76,6 +76,9 @@ class TgIO(TelegramIO):
     def __init__(self):
         self.app: Application | None = None
         self.pending_perms: dict[str, asyncio.Future] = {}
+        # question buttons: token -> Question; chat_id -> token being asked
+        self.questions: dict[str, Question] = {}
+        self.asking: dict[int, str] = {}
         # chat_id -> (message_id, last_edit_monotonic)
         self._status: dict[int, tuple[int, float]] = {}
 
@@ -275,6 +278,103 @@ class TgIO(TelegramIO):
             self.pending_perms.pop(token, None)
 
 
+    # ----- multiple-choice questions (AskUserQuestion) -----
+
+    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | None:
+        """Ask each question in turn as a message with one button per option
+        (toggles + Done for multi-select, and Other… for free text). A typed
+        or spoken reply also answers the question on screen. None if the
+        chat cancelled (/stop) or the turn gave up waiting."""
+        answers = {}
+        for q in questions:
+            token = uuid.uuid4().hex[:16]
+            item = Question(chat_id, q, asyncio.get_running_loop().create_future())
+            self.questions[token] = item
+            self.asking[chat_id] = token
+            try:
+                msg = await self.app.bot.send_message(
+                    chat_id, item.render(), parse_mode="HTML",
+                    reply_markup=item.keyboard(token))
+                item.msg_id = msg.message_id
+                answer = await item.fut
+            except asyncio.CancelledError:
+                await self._close_question(item, "(expired)")
+                raise
+            finally:
+                self.questions.pop(token, None)
+                if self.asking.get(chat_id) == token:
+                    self.asking.pop(chat_id, None)
+            if answer is None:
+                await self._close_question(item, "(cancelled)")
+                return None
+            await self._close_question(item, f"→ {answer}")
+            answers[q.get("question", "")] = answer
+        return answers
+
+    async def _close_question(self, item: "Question", note: str):
+        if item.msg_id is None:
+            return
+        try:
+            await self.app.bot.edit_message_text(
+                item.render(options=False) + f"\n\n<b>{html.escape(note)}</b>",
+                chat_id=item.chat_id, message_id=item.msg_id, parse_mode="HTML")
+        except Exception:
+            pass
+
+    def answer_typed(self, chat_id: int, text: str) -> bool:
+        """A message sent while a question is on screen is its answer."""
+        item = self.questions.get(self.asking.get(chat_id, ""))
+        if item is None or item.fut.done():
+            return False
+        item.fut.set_result(text.strip())
+        return True
+
+    def cancel_questions(self, chat_id: int) -> None:
+        item = self.questions.get(self.asking.get(chat_id, ""))
+        if item is not None and not item.fut.done():
+            item.fut.set_result(None)
+
+
+class Question:
+    """One AskUserQuestion question on screen."""
+
+    def __init__(self, chat_id: int, q: dict, fut: asyncio.Future):
+        self.chat_id = chat_id
+        self.q = q
+        self.fut = fut
+        self.options = [o.get("label", "") for o in q.get("options") or []]
+        self.multi = bool(q.get("multiSelect"))
+        self.picked: set[int] = set()
+        self.msg_id: int | None = None
+
+    def render(self, options: bool = True) -> str:
+        head = self.q.get("header")
+        text = "❓ " + (f"<b>{html.escape(head)}</b>\n" if head else "")
+        text += html.escape(self.q.get("question", ""))
+        if options:
+            lines = []
+            for o in self.q.get("options") or []:
+                d = o.get("description", "")
+                lines.append(f"• <b>{html.escape(o.get('label', ''))}</b>"
+                             + (f" — {html.escape(d)}" if d and d != o.get("label") else ""))
+            if lines:
+                text += "\n\n" + "\n".join(lines)
+            text += ("\n\n<i>Tap to select, then Done — or type your own answer.</i>"
+                     if self.multi else "\n\n<i>Tap one — or type your own answer.</i>")
+        return text
+
+    def keyboard(self, token: str) -> InlineKeyboardMarkup:
+        rows = []
+        for i, label in enumerate(self.options):
+            mark = ("☑️ " if i in self.picked else "⬜ ") if self.multi else ""
+            rows.append([InlineKeyboardButton(mark + label, callback_data=f"q|{token}|{i}")])
+        last = [InlineKeyboardButton("✏️ Other…", callback_data=f"q|{token}|o")]
+        if self.multi:
+            last.append(InlineKeyboardButton("✅ Done", callback_data=f"q|{token}|d"))
+        rows.append(last)
+        return InlineKeyboardMarkup(rows)
+
+
 io = TgIO()
 manager = ChatManager(io)
 
@@ -407,6 +507,7 @@ async def cmd_resume(update: Update, context):
 
 async def cmd_stop(update: Update, context):
     session = manager.get(update.effective_chat.id)
+    io.cancel_questions(update.effective_chat.id)
     stopped = await session.interrupt()
     await update.message.reply_text(
         "🛑 Interrupted." if stopped else "Nothing is running.")
@@ -897,6 +998,8 @@ async def on_text(update: Update, context, text: str | None = None):
     chat_id = update.effective_chat.id
     if await _handle_login_code(update, context):
         return
+    if text is None and io.answer_typed(chat_id, update.message.text):
+        return
     if chat_id in cwd_mkdir_pending:
         base, prompt_id, browse_id = cwd_mkdir_pending[chat_id]
         reply_to = update.message.reply_to_message
@@ -964,6 +1067,8 @@ async def on_voice(update: Update, context):
         await msg.reply_text("🎤 (couldn't hear anything in that)")
         return
     await msg.reply_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode="HTML")
+    if io.answer_typed(update.effective_chat.id, text):
+        return
     _submit(update, text, was_voice=True)
 
 
@@ -1019,6 +1124,48 @@ async def on_perm_button(update: Update, context):
                                           + "\n\n(expired)", parse_mode="HTML")
         except Exception:
             pass
+    await query.answer()
+
+
+async def on_question_button(update: Update, context):
+    query = update.callback_query
+    try:
+        _, token, choice = query.data.split("|")
+    except ValueError:
+        await query.answer()
+        return
+    item = io.questions.get(token)
+    if item is None or item.fut.done():
+        await query.answer("This question is no longer open.")
+        try:
+            await query.edit_message_reply_markup(None)
+        except Exception:
+            pass
+        return
+    if choice == "o":
+        await query.answer("Type your answer as a message.")
+        try:
+            await query.edit_message_text(
+                item.render(options=False) + "\n\n<i>✏️ Type your answer…</i>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        return
+    if choice == "d":
+        if not item.picked:
+            await query.answer("Pick at least one option first.")
+            return
+        item.fut.set_result(", ".join(item.options[i] for i in sorted(item.picked)))
+    elif choice.isdigit() and int(choice) < len(item.options):
+        i = int(choice)
+        if item.multi:
+            item.picked ^= {i}
+            try:
+                await query.edit_message_reply_markup(item.keyboard(token))
+            except Exception:
+                pass
+        else:
+            item.fut.set_result(item.options[i])
     await query.answer()
 
 
@@ -1086,6 +1233,7 @@ def main():
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
 
     app.add_handler(CallbackQueryHandler(on_perm_button, pattern=r"^p\|"))
+    app.add_handler(CallbackQueryHandler(on_question_button, pattern=r"^q\|"))
     app.add_handler(CallbackQueryHandler(on_resume_button, pattern=r"^r\|"))
     app.add_handler(CallbackQueryHandler(on_active_button, pattern=r"^ra\|"))
     app.add_handler(CallbackQueryHandler(on_cwd_button, pattern=r"^d\|"))

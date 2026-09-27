@@ -44,6 +44,7 @@ SAFE_TOOLS = {
 }
 
 PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min
+QUESTION_TIMEOUT_S = 3600  # give up on unanswered question buttons after 1 h
 
 # While a Claude usage limit is active, queued prompts are retried this often
 # (a limit can lift before the advertised reset, e.g. after buying credits).

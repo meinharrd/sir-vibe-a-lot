@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -34,6 +35,10 @@ import config
 import router
 
 log = logging.getLogger(__name__)
+
+# can_use_tool is set in bypassPermissions mode on purpose (AskUserQuestion
+# still reaches it there); the SDK warns that other tools skip it.
+warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 
 
 # Usage-limit notices from Claude Code. Seen shapes:
@@ -436,6 +441,8 @@ class TelegramIO:
     async def status_done(self, chat_id: int, text: str): ...
     async def ask_permission(self, chat_id: int, text: str) -> str: ...
     """Returns "allow" | "deny" | "always"."""
+    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | None: ...
+    """AskUserQuestion as buttons: {question text: answer}, None if cancelled."""
 
 
 RESTART_NOTE = (
@@ -534,7 +541,10 @@ class ChatSession:
     # ---------- permissions ----------
 
     async def _can_use_tool(self, tool_name: str, tool_input: dict, context):
-        if tool_name in config.SAFE_TOOLS or tool_name in self.state.always_allowed:
+        if tool_name == "AskUserQuestion":
+            return await self._ask_questions(tool_input)
+        if (self.state.mode != "ask" or tool_name in config.SAFE_TOOLS
+                or tool_name in self.state.always_allowed):
             return PermissionResultAllow()
         from formatting import tool_summary
         summary = tool_summary(tool_name, tool_input)
@@ -553,6 +563,22 @@ class ChatSession:
         if answer == "allow":
             return PermissionResultAllow()
         return PermissionResultDeny(message="The user denied this tool call.")
+
+    async def _ask_questions(self, tool_input: dict):
+        """Claude's multiple-choice questions, answered with Telegram buttons.
+        The answers go back as the tool input's `answers` map."""
+        questions = tool_input.get("questions") or []
+        try:
+            answers = await asyncio.wait_for(
+                self.io.ask_questions(self.chat_id, questions),
+                timeout=config.QUESTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            answers = None
+        if not answers:
+            return PermissionResultDeny(
+                message="The user did not answer the question buttons. If you "
+                        "still need an answer, ask in plain text.")
+        return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
     # ---------- client lifecycle ----------
 
@@ -574,7 +600,10 @@ class ChatSession:
             model=self.state.model,
             resume=self.state.session_id,
             permission_mode="default" if ask else "bypassPermissions",
-            can_use_tool=self._can_use_tool if ask else None,
+            # Also set in auto mode: bypassPermissions skips it for every
+            # tool but AskUserQuestion, which is how questions reach the
+            # buttons (without a callback the CLI drops that tool).
+            can_use_tool=self._can_use_tool,
             setting_sources=["user", "project", "local"],
             mcp_servers={"telegram": self._mcp_server()},
             allowed_tools=[
