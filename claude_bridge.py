@@ -619,7 +619,24 @@ class ChatSession:
             max_buffer_size=64 * 1024 * 1024,
         )
 
+    def _account_moved(self) -> bool:
+        """An auto-routed chat whose connected account is no longer the pick.
+
+        The pick is made at connect time, so a long-lived chat would keep the
+        account that was best when it started — e.g. stay on a subscription
+        whose weekly window has since reset while another one is about to
+        expire unused. Re-checked before every prompt (cheap: cached state).
+        """
+        if self.state.account or self.account is None:
+            return False
+        acct = router.pick(None, resolve_model(self.state.model))
+        return acct is not None and acct.name != self.account
+
     async def _ensure_client(self):
+        if self.client is not None and not self._needs_reconnect and self._account_moved():
+            log.info("chat %s: moving from account %s to the current pick",
+                     self.chat_id, self.account)
+            self._needs_reconnect = True
         if self.client is not None and self._needs_reconnect:
             await self._disconnect()
         if self.client is None:
