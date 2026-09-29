@@ -69,6 +69,10 @@ def _alan_core():
         return None
     try:
         sys.modules.setdefault("accounts", mod)
+        # alan.py imports its other sibling modules (emuslot, …) by name.
+        # Appended, not prepended, so they never shadow this bot's modules.
+        if str(path.parent) not in sys.path:
+            sys.path.append(str(path.parent))
         spec = importlib.util.spec_from_file_location("alan_core", path)
         core = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = core
