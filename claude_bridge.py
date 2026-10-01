@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     RateLimitEvent,
     TextBlock,
     ToolUseBlock,
+    UserMessage,
     PermissionResultAllow,
     PermissionResultDeny,
     tool,
@@ -472,6 +473,13 @@ class ChatSession:
         # and re-submitted after a restart (see ChatManager.pending()).
         self.queue: collections.deque = collections.deque()
         self.in_flight: tuple | None = None
+        # Prompts sent into the running turn (see submit()) that Claude has
+        # not read yet — the CLI echoes each one (--replay-user-messages)
+        # when it reads it: at the next tool boundary, or as a turn of its
+        # own right after the current one ends. Those read during the
+        # current worker item move to _absorbed.
+        self.injected: list[tuple] = []
+        self._absorbed: list[tuple] = []
         self.worker: asyncio.Task | None = None
         self.busy = False
         self._needs_reconnect = False
@@ -617,6 +625,9 @@ class ChatSession:
             # results (big file reads, long command output) exceed that and
             # kill the session with "JSON message exceeded maximum buffer size".
             max_buffer_size=64 * 1024 * 1024,
+            # Echo each user message when the CLI reads it, so prompts sent
+            # mid-turn can be told apart: absorbed, or still to run.
+            extra_args={"replay-user-messages": None},
         )
 
     def _account_moved(self) -> bool:
@@ -720,8 +731,27 @@ class ChatSession:
 
     # ---------- prompt execution ----------
 
-    def submit(self, prompt, want_voice: bool = False):
-        """Queue a prompt (str, or dict for rich content). Starts worker."""
+    def _can_inject(self, prompt) -> bool:
+        return (self.busy and self.client is not None
+                and self._turn_done is not None and not self._turn_done.done()
+                and not self._needs_reconnect and not self._hit_limit
+                and not USAGE_LIMIT.active
+                # Slash commands (/compact, ...) only work as a turn's prompt.
+                and not (isinstance(prompt, str) and prompt.lstrip().startswith("/")))
+
+    def submit(self, prompt, want_voice: bool = False, inject: bool = True):
+        """Queue a prompt (str, or dict for rich content). Starts worker.
+
+        While a turn is running the prompt is instead sent straight into it
+        (unless inject=False), so Claude reads it at its next tool call —
+        follow-up info steers the work in progress. Returns 0 then, else the
+        queue position."""
+        if inject and self._can_inject(prompt):
+            self.injected.append((prompt, want_voice))
+            self._save_queue()
+            asyncio.get_running_loop().create_task(
+                self._inject(prompt, want_voice))
+            return 0
         self.queue.append((prompt, want_voice))
         self._save_queue()
         if USAGE_LIMIT.active:
@@ -733,13 +763,45 @@ class ChatSession:
             self.worker = asyncio.get_running_loop().create_task(self._worker())
         return len(self.queue)
 
+    async def _inject(self, prompt, want_voice):
+        item = (prompt, want_voice)
+        try:
+            await self.client.query(_stream(prompt) if isinstance(prompt, dict)
+                                    else prompt)
+        except Exception as e:
+            log.warning("chat %s: injecting failed (%s), queueing instead",
+                        self.chat_id, e)
+            if item in self.injected:
+                self.injected.remove(item)
+                self.submit(prompt, want_voice, inject=False)
+
+    def _reclaim_injected(self):
+        """Put prompts that were sent into a turn but never read back at the
+        front of the queue (the turn failed or the client went away)."""
+        self.queue.extendleft(reversed(self.injected))
+        self.injected = []
+
+    def _on_echo(self, message: UserMessage):
+        key = _echo_key(message)
+        if key is None:
+            return
+        for item in self.injected:
+            if _prompt_key(item[0]) == key:
+                self.injected.remove(item)
+                self._absorbed.append(item)
+                self._save_queue()
+                return
+
     def pending(self) -> list[dict]:
-        """Everything not yet answered, oldest first, JSON-serialisable."""
+        """Everything not yet answered, oldest first, JSON-serialisable.
+        Prompts Claude already read mid-turn are in the transcript and
+        covered by re-sending the in-flight one."""
         items = []
         if self.in_flight is not None:
             items.append({"prompt": self.in_flight[0], "want_voice": self.in_flight[1],
                           "in_flight": True})
-        items += [{"prompt": p, "want_voice": v} for p, v in self.queue]
+        items += [{"prompt": p, "want_voice": v}
+                  for p, v in [*self.injected, *self.queue]]
         return items
 
     def restore(self, items: list[dict]) -> int:
@@ -774,6 +836,7 @@ class ChatSession:
                 return
             prompt, want_voice = self.in_flight = self.queue.popleft()
             self.busy = True
+            self._absorbed = []
             self._hit_limit = False
             self._switched_to = None
             self._save_queue()
@@ -781,8 +844,11 @@ class ChatSession:
             try:
                 text = await self._run(prompt)
                 if self._hit_limit:
+                    self._reclaim_injected()
+                    self.queue.extendleft(reversed(self._absorbed))
                     self._requeue_limited(prompt, want_voice)
                     continue
+                want_voice = want_voice or any(v for _, v in self._absorbed)
                 if want_voice and text:
                     try:
                         await self.io.send_voice_text(self.chat_id, text)
@@ -799,15 +865,18 @@ class ChatSession:
                     # Limit surfaced as an exception (e.g. connect failure):
                     # same treatment — back off, re-queue, retry.
                     self._needs_reconnect = True
+                    self._reclaim_injected()
                     self._requeue_limited(prompt, want_voice)
                     await self._limit_hit(reset_ts, text=str(e))
                     continue
                 log.exception("query failed for chat %s", self.chat_id)
                 self._needs_reconnect = True
+                self._reclaim_injected()
                 await self.io.send_text(
                     self.chat_id, f"⚠️ Claude session error: {e}", markdown=False)
             finally:
                 self.busy = False
+                self._absorbed = []
                 if not shutting_down:
                     self.in_flight = None
                     self._save_queue()
@@ -818,19 +887,21 @@ class ChatSession:
         fut = asyncio.get_running_loop().create_future()
         self._turn_done = fut
 
-        if isinstance(prompt, dict):  # rich content (images etc.)
-            async def gen():
-                yield {"type": "user",
-                       "message": {"role": "user", "content": prompt["content"]}}
-            await self.client.query(gen())
-        else:
-            await self.client.query(prompt)
+        await self.client.query(_stream(prompt) if isinstance(prompt, dict)
+                                else prompt)
 
         # The receiver resolves the future at the next end-of-turn
         # (ResultMessage). If the prompt got injected into a turn that a
         # background task started, that turn's end covers the reply too.
+        # Prompts sent mid-turn that the turn ended without reading run as
+        # turns of their own straight after — wait for those as well.
         try:
-            return await fut
+            texts = [await fut]
+            while self.injected and not self._hit_limit:
+                fut = asyncio.get_running_loop().create_future()
+                self._turn_done = fut
+                texts.append(await fut)
+            return "\n\n".join(t for t in texts if t)
         finally:
             if self._turn_done is fut:
                 self._turn_done = None
@@ -923,6 +994,9 @@ class ChatSession:
                 self._save()
             elif message.subtype == "compact_boundary":
                 await self.io.status_update(self.chat_id, "🗜 compacted context")
+        elif isinstance(message, UserMessage):
+            if self.injected:
+                self._on_echo(message)
         elif isinstance(message, RateLimitEvent):
             await self._on_rate_limit(message.rate_limit_info)
         elif isinstance(message, AssistantMessage):
@@ -1084,6 +1158,28 @@ class ChatManager:
             self.sessions[chat_id] = ChatSession(
                 chat_id, state, self.io, self.save, self.save_pending)
         return self.sessions[chat_id]
+
+
+async def _stream(prompt: dict):
+    """A rich prompt (images etc.) as the message stream query() takes."""
+    yield {"type": "user",
+           "message": {"role": "user", "content": prompt["content"]}}
+
+
+def _prompt_key(prompt) -> str | None:
+    """The text a prompt is recognised by when the CLI echoes it."""
+    if isinstance(prompt, dict):
+        texts = [b.get("text", "") for b in prompt.get("content", [])
+                 if b.get("type") == "text"]
+        return texts[-1].strip() if texts else None
+    return prompt.strip()
+
+
+def _echo_key(message: UserMessage) -> str | None:
+    if isinstance(message.content, str):
+        return message.content.strip()
+    texts = [b.text for b in message.content if isinstance(b, TextBlock)]
+    return texts[-1].strip() if texts else None
 
 
 def image_prompt(image_path: str, caption: str) -> dict:

@@ -56,6 +56,7 @@ Send any text, voice note, photo, or file — it goes straight to Claude.
 /new — start a fresh session
 /resume — resume sessions
 /stop — interrupt the current run
+/queue <i>text</i> — run a message after the current task (plain messages sent while Claude works are added to the running task)
 /status — session info &amp; cost
 /retry — retry queued messages now (e.g. right after topping up usage)
 /model <i>[fable|opus|sonnet|haiku|default|&lt;model-id&gt;]</i> — switch model (no arg: show what each resolves to)
@@ -509,8 +510,10 @@ async def cmd_stop(update: Update, context):
     session = manager.get(update.effective_chat.id)
     io.cancel_questions(update.effective_chat.id)
     stopped = await session.interrupt()
+    note = (" Your follow-up message runs next." if stopped and session.injected
+            else "")
     await update.message.reply_text(
-        "🛑 Interrupted." if stopped else "Nothing is running.")
+        f"🛑 Interrupted.{note}" if stopped else "Nothing is running.")
 
 
 async def cmd_retry(update: Update, context):
@@ -979,7 +982,8 @@ def _reply_context(msg) -> str:
     return f"[The user is replying to {who}:\n{text}\n]\n\n"
 
 
-def _submit(update: Update, prompt, was_voice: bool = False):
+def _submit(update: Update, prompt, was_voice: bool = False,
+            inject: bool = True):
     if ctx := _reply_context(update.message):
         if isinstance(prompt, dict):
             block = prompt["content"][-1]
@@ -990,8 +994,28 @@ def _submit(update: Update, prompt, was_voice: bool = False):
     session = manager.get(chat_id)
     want_voice = (session.state.voice == "always"
                   or (session.state.voice == "auto" and was_voice))
-    queued = session.submit(prompt, want_voice=want_voice)
+    queued = session.submit(prompt, want_voice=want_voice, inject=inject)
     return session, queued
+
+
+async def _ack(update: Update, session, queued: int):
+    """Tell the user where a message went when it doesn't start a run."""
+    if queued == 0:
+        await update.message.reply_text(
+            "📨 Added to the current task — Claude reads it at its next step.")
+    elif queued > 1 or session.busy:
+        await update.message.reply_text(f"⏳ Queued (position {queued}).")
+
+
+async def cmd_queue(update: Update, context):
+    """/queue <text> — run after the current task instead of joining it."""
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "Usage: /queue <message> — runs after the current task finishes "
+            "(plain messages are added to the running task).")
+        return
+    await _ack(update, *_submit(update, text, inject=False))
 
 
 async def on_text(update: Update, context, text: str | None = None):
@@ -1026,10 +1050,8 @@ async def on_text(update: Update, context, text: str | None = None):
             return
         # any non-reply message cancels the prompt and is handled normally
         await _cancel_mkdir_prompt(chat_id, context.bot)
-    session, queued = _submit(update, text if text is not None
-                              else update.message.text)
-    if queued > 1 or session.busy:
-        await update.message.reply_text(f"⏳ Queued (position {queued}).")
+    await _ack(update, *_submit(update, text if text is not None
+                                else update.message.text))
 
 
 async def on_unknown_command(update: Update, context):
@@ -1069,7 +1091,7 @@ async def on_voice(update: Update, context):
     await msg.reply_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode="HTML")
     if io.answer_typed(update.effective_chat.id, text):
         return
-    _submit(update, text, was_voice=True)
+    await _ack(update, *_submit(update, text, was_voice=True))
 
 
 async def on_photo(update: Update, context):
@@ -1080,7 +1102,7 @@ async def on_photo(update: Update, context):
     path = chat_dir / f"photo_{int(time.time())}.jpg"
     tg_file = await photo.get_file()
     await tg_file.download_to_drive(path)
-    _submit(update, image_prompt(str(path), msg.caption or ""))
+    await _ack(update, *_submit(update, image_prompt(str(path), msg.caption or "")))
 
 
 async def on_document(update: Update, context):
@@ -1093,10 +1115,10 @@ async def on_document(update: Update, context):
     tg_file = await doc.get_file()
     await tg_file.download_to_drive(path)
     if (doc.mime_type or "").startswith("image/"):
-        _submit(update, image_prompt(str(path), msg.caption or ""))
+        await _ack(update, *_submit(update, image_prompt(str(path), msg.caption or "")))
         return
     caption = msg.caption or "The user sent this file."
-    _submit(update, f"{caption}\n(The file is saved at {path})")
+    await _ack(update, *_submit(update, f"{caption}\n(The file is saved at {path})"))
 
 
 async def on_perm_button(update: Update, context):
@@ -1205,6 +1227,7 @@ async def post_init(app: Application):
         BotCommand("new", "start a fresh session"),
         BotCommand("resume", "resume sessions"),
         BotCommand("stop", "interrupt the current run"),
+        BotCommand("queue", "run a message after the current task"),
         BotCommand("status", "session info and cost"),
         BotCommand("cost", "billing mode and usage totals"),
         BotCommand("model", "switch model: fable / opus / sonnet / haiku"),
@@ -1243,6 +1266,7 @@ def main():
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("retry", cmd_retry))
     app.add_handler(CommandHandler("cost", cmd_cost))
