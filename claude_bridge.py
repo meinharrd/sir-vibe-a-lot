@@ -200,6 +200,10 @@ Output rules:
   reply.
 - Files the user sends you (photos, documents, voice notes) are saved on disk
   and their paths are included in the message; you can Read them.
+- Whenever you need a decision from the user (a choice between options,
+  yes/no, "shall I…?"), ask it with the AskUserQuestion tool so it shows as
+  reply buttons, not as a question in prose. Put the recommended option
+  first. With several open decisions, ask them one at a time.
 
 Self-maintenance: this bot's own source code lives in
 {config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
