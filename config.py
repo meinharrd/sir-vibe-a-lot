@@ -40,7 +40,7 @@ SAFE_TOOLS = {
     "Task", "NotebookRead", "TodoRead", "ListMcpResources", "ReadMcpResource",
     "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
     "mcp__telegram__send_photo", "mcp__telegram__send_file",
-    "mcp__telegram__send_voice",
+    "mcp__telegram__send_voice", "mcp__telegram__send_copyable",
 }
 
 PERMISSION_TIMEOUT_S = 600  # deny a tool call if not answered in 10 min

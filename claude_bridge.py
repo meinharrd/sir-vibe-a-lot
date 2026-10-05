@@ -200,6 +200,11 @@ Output rules:
   reply.
 - Files the user sends you (photos, documents, voice notes) are saved on disk
   and their paths are included in the message; you can Read them.
+- Text meant to be copied (links, bzz/IPFS refs, hashes, addresses,
+  commands) goes in its own message containing only a code block: call
+  mcp__telegram__send_copyable with just that text, once per item, and keep
+  any explanation in your normal reply. Telegram's copy button only copies
+  cleanly when the code block is the whole message.
 - Whenever you need a decision from the user (a choice between options,
   yes/no, "shall I…?"), ask it with the AskUserQuestion tool so it shows as
   reply buttons, not as a question in prose. Put the recommended option
@@ -546,9 +551,19 @@ class ChatSession:
             await io.send_voice_text(chat_id, args["text"])
             return {"content": [{"type": "text", "text": "Voice note sent."}]}
 
+        @tool("send_copyable",
+              "Send text the user should copy (a link, hash, command, address) "
+              "as its own Telegram message containing only a code block, so "
+              "the copy button copies exactly that text.",
+              {"text": str})
+        async def send_copyable(args: dict[str, Any]):
+            text = args["text"].strip().replace("```", "` ` `")
+            await io.send_text(chat_id, f"```\n{text}\n```")
+            return {"content": [{"type": "text", "text": "Copyable message sent."}]}
+
         return create_sdk_mcp_server(
             name="telegram", version="1.0.0",
-            tools=[send_photo, send_file, send_voice],
+            tools=[send_photo, send_file, send_voice, send_copyable],
         )
 
     # ---------- permissions ----------
@@ -623,6 +638,7 @@ class ChatSession:
                 "mcp__telegram__send_photo",
                 "mcp__telegram__send_file",
                 "mcp__telegram__send_voice",
+                "mcp__telegram__send_copyable",
             ],
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": SYSTEM_APPEND},
