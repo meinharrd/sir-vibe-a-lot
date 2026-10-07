@@ -247,9 +247,13 @@ class TgIO(TelegramIO):
             pass  # status is best-effort
 
     async def status_done(self, chat_id: int, text: str):
+        """Finish the status line with text, or remove it when text is empty."""
         entry = self._status.pop(chat_id, None)
         try:
-            if entry is not None:
+            if not text:
+                if entry is not None:
+                    await self.app.bot.delete_message(chat_id, entry[0])
+            elif entry is not None:
                 await self.app.bot.edit_message_text(
                     text, chat_id=chat_id, message_id=entry[0])
             else:

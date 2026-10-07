@@ -440,6 +440,7 @@ class TelegramIO:
     async def send_voice_text(self, chat_id: int, text: str): ...
     async def status_update(self, chat_id: int, text: str): ...
     async def status_done(self, chat_id: int, text: str): ...
+    """Empty text removes the status line instead."""
     async def ask_permission(self, chat_id: int, text: str) -> str: ...
     """Returns "allow" | "deny" | "always"."""
     async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | None: ...
@@ -1059,8 +1060,8 @@ class ChatSession:
                     USAGE_LIMIT.clear()
                     log.info("usage limit lifted early (chat %s got through)",
                              self.chat_id)
-                await self.io.status_done(
-                    self.chat_id, f"✅ done in {elapsed:.0f}s{cost}")
+                # The reply speaks for itself: drop the status line.
+                await self.io.status_done(self.chat_id, "")
                 # /compact, /context etc. return their output only in
                 # result.result — surface it if nothing was streamed.
                 if not self._collected and message.result:
