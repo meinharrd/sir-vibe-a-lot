@@ -217,7 +217,10 @@ asks you to change or improve the bot:
 1. Edit the code there.
 2. Verify it compiles: .venv/bin/python -m py_compile bot.py claude_bridge.py
    audio.py formatting.py config.py login.py
-3. Commit your change to git (so it can be rolled back with git revert).
+3. Commit your change to git (so it can be rolled back with git revert),
+   then `git push` it to GitHub right away (pull --rebase first if the push
+   is rejected). Every change to the bot's behaviour goes to GitHub, never
+   just a local commit: other hosts run the same repo and update by pulling.
 4. Before restarting, run `.venv/bin/python tools/restart_check.py`. It
    lists chats with a prompt in flight and recently active sessions, and
    flags those waiting on background work (monitors, wake-ups, background
