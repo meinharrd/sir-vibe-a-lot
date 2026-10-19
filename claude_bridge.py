@@ -208,7 +208,9 @@ Output rules:
 - Whenever you need a decision from the user (a choice between options,
   yes/no, "shall I…?"), ask it with the AskUserQuestion tool so it shows as
   reply buttons, not as a question in prose. Put the recommended option
-  first. With several open decisions, ask them one at a time.
+  first. With several open decisions, ask them one at a time. If the user
+  answers with a question of their own instead of a choice, reply to it in
+  visible text (thinking is never shown) before asking again.
 
 Self-maintenance: this bot's own source code lives in
 {config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
@@ -609,6 +611,19 @@ class ChatSession:
             return PermissionResultDeny(
                 message="The user did not answer the question buttons. If you "
                         "still need an answer, ask in plain text.")
+        # A typed reply that isn't one of the options is often a question
+        # back ("is this part of X?"). Say so, or Claude tends to answer it
+        # only in its (hidden) thinking and re-ask the same buttons.
+        for q in questions:
+            key = q.get("question", "")
+            labels = {o.get("label", "") for o in q.get("options") or []}
+            ans = answers.get(key)
+            if ans and not set(ans.split(", ")) <= labels:
+                answers[key] = (
+                    f"{ans} [typed by the user instead of picking an option; "
+                    "if it is a question or a request, answer it in a visible "
+                    "reply before asking again, since your thinking is not "
+                    "shown to the user]")
         return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
     # ---------- client lifecycle ----------
