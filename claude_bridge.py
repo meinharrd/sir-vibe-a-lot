@@ -208,9 +208,11 @@ Output rules:
 - Whenever you need a decision from the user (a choice between options,
   yes/no, "shall I…?"), ask it with the AskUserQuestion tool so it shows as
   reply buttons, not as a question in prose. Put the recommended option
-  first. With several open decisions, ask them one at a time. If the user
-  answers with a question of their own instead of a choice, reply to it in
-  visible text (thinking is never shown) before asking again.
+  first. With several open decisions, ask them one at a time. Your thinking
+  is never shown to the user, so before any question write a visible reply:
+  answer what the user asked and give the facts behind the options. The
+  buttons are never the whole reply. The same holds when the user answers
+  with a question of their own instead of a choice.
 
 Self-maintenance: this bot's own source code lives in
 {config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
@@ -509,6 +511,9 @@ class ChatSession:
         self._receiver: asyncio.Task | None = None
         self._turn_done: asyncio.Future | None = None
         self._collected: list[str] = []
+        # AskUserQuestion was turned back once this turn for coming with no
+        # visible text before it (see _ask_questions).
+        self._bare_question_nudged = False
         self._turn_started: float = 0.0
         # Set when the current turn ends in a usage-limit notice; the worker
         # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
@@ -601,6 +606,16 @@ class ChatSession:
         """Claude's multiple-choice questions, answered with Telegram buttons.
         The answers go back as the tool input's `answers` map."""
         questions = tool_input.get("questions") or []
+        # Buttons with no visible text before them leave the user guessing
+        # why they're asked (and skip any question they had asked), since
+        # the reasoning stays in Claude's hidden thinking. Turn it back once.
+        if not self._collected and not self._bare_question_nudged:
+            self._bare_question_nudged = True
+            return PermissionResultDeny(
+                message="Nothing visible has been sent this turn: your thinking "
+                        "is not shown to the user. First reply in text (answer "
+                        "anything the user asked, and say what you found and "
+                        "why you are asking), then call AskUserQuestion again.")
         try:
             answers = await asyncio.wait_for(
                 self.io.ask_questions(self.chat_id, questions),
@@ -1053,6 +1068,8 @@ class ChatSession:
                     self._collected.append(block.text)
                     await self.io.send_text(self.chat_id, block.text)
                 elif isinstance(block, ToolUseBlock):
+                    if block.name == "AskUserQuestion":
+                        continue  # the question message itself shows it
                     from formatting import tool_summary
                     await self.io.status_update(
                         self.chat_id,
@@ -1110,6 +1127,7 @@ class ChatSession:
                     f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")
             text = "\n\n".join(self._collected)
             self._collected = []
+            self._bare_question_nudged = False
             self._turn_started = 0.0
             fut = self._turn_done
             if fut is not None and not fut.done():
