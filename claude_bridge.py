@@ -511,8 +511,11 @@ class ChatSession:
         self._receiver: asyncio.Task | None = None
         self._turn_done: asyncio.Future | None = None
         self._collected: list[str] = []
-        # AskUserQuestion was turned back once this turn for coming with no
-        # visible text before it (see _ask_questions).
+        # AskUserQuestion needs new visible text first while len(_collected)
+        # is still at this mark (None: no need): 0 at turn start, and the
+        # count at the time of a typed answer. Turned back once per mark
+        # (see _ask_questions).
+        self._ask_mark: int | None = 0
         self._bare_question_nudged = False
         self._turn_started: float = 0.0
         # Set when the current turn ends in a usage-limit notice; the worker
@@ -608,14 +611,23 @@ class ChatSession:
         questions = tool_input.get("questions") or []
         # Buttons with no visible text before them leave the user guessing
         # why they're asked (and skip any question they had asked), since
-        # the reasoning stays in Claude's hidden thinking. Turn it back once.
-        if not self._collected and not self._bare_question_nudged:
+        # the reasoning stays in Claude's hidden thinking. Same right after
+        # a typed answer: Claude tends to answer it only in its thinking and
+        # re-ask. Turn it back once.
+        if (self._ask_mark is not None and len(self._collected) <= self._ask_mark
+                and not self._bare_question_nudged):
             self._bare_question_nudged = True
+            what = ("anything the user asked, and say what you found and why "
+                    "you are asking" if self._ask_mark == 0 else
+                    "what the user typed in reply to your last question; "
+                    "they asked it and expect to read your answer")
             return PermissionResultDeny(
-                message="Nothing visible has been sent this turn: your thinking "
-                        "is not shown to the user. First reply in text (answer "
-                        "anything the user asked, and say what you found and "
-                        "why you are asking), then call AskUserQuestion again.")
+                message="Nothing visible has been sent since "
+                        + ("this turn started" if self._ask_mark == 0
+                           else "the user's typed answer")
+                        + ": your thinking is not shown to the user. First "
+                        f"reply in text (answer {what}), then call "
+                        "AskUserQuestion again if still needed.")
         try:
             answers = await asyncio.wait_for(
                 self.io.ask_questions(self.chat_id, questions),
@@ -629,6 +641,7 @@ class ChatSession:
         # A typed reply that isn't one of the options is often a question
         # back ("is this part of X?"). Say so, or Claude tends to answer it
         # only in its (hidden) thinking and re-ask the same buttons.
+        self._ask_mark = None
         for q in questions:
             key = q.get("question", "")
             labels = {o.get("label", "") for o in q.get("options") or []}
@@ -639,6 +652,8 @@ class ChatSession:
                     "if it is a question or a request, answer it in a visible "
                     "reply before asking again, since your thinking is not "
                     "shown to the user]")
+                self._ask_mark = len(self._collected)
+                self._bare_question_nudged = False
         return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
     # ---------- client lifecycle ----------
@@ -1127,6 +1142,7 @@ class ChatSession:
                     f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")
             text = "\n\n".join(self._collected)
             self._collected = []
+            self._ask_mark = 0
             self._bare_question_nudged = False
             self._turn_started = 0.0
             fut = self._turn_done
