@@ -459,9 +459,13 @@ class TelegramIO:
     """Empty text removes the status line instead."""
     async def ask_permission(self, chat_id: int, text: str) -> str: ...
     """Returns "allow" | "deny" | "always"."""
-    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | None: ...
-    """AskUserQuestion as buttons: {question text: answer}, None if cancelled."""
+    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | str | None: ...
+    """AskUserQuestion as buttons: {question text: answer}, DISMISSED if the
+    user tapped Cancel, None if the chat was stopped."""
 
+
+# ask_questions() result when the user taps a question's Cancel button.
+DISMISSED = "dismissed"
 
 RESTART_NOTE = (
     "[The bot process was restarted while this message was being worked on. "
@@ -634,6 +638,13 @@ class ChatSession:
                 timeout=config.QUESTION_TIMEOUT_S)
         except asyncio.TimeoutError:
             answers = None
+        if answers == DISMISSED:
+            return PermissionResultDeny(
+                message="The user tapped Cancel on this question: they don't "
+                        "want to decide it now. Don't ask it again and don't "
+                        "take any of the offered actions. Drop this decision "
+                        "and continue with the next task if there is one; "
+                        "otherwise stop, saying in one line what was left open.")
         if not answers:
             return PermissionResultDeny(
                 message="The user did not answer the question buttons. If you "

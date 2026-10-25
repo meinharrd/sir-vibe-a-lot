@@ -33,7 +33,7 @@ import audio
 import config
 import router
 from claude_bridge import (
-    MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
+    DISMISSED, MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
     context_line, default_model_setting, fmt_reset, image_prompt, model_aliases,
     resolve_model, _project_dir,
 )
@@ -285,11 +285,12 @@ class TgIO(TelegramIO):
 
     # ----- multiple-choice questions (AskUserQuestion) -----
 
-    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | None:
+    async def ask_questions(self, chat_id: int, questions: list[dict]) -> dict | str | None:
         """Ask each question in turn as a message with one button per option
-        (toggles + Done for multi-select, and Other… for free text). A typed
-        or spoken reply also answers the question on screen. None if the
-        chat cancelled (/stop) or the turn gave up waiting."""
+        (toggles + Done for multi-select, Other… for free text, and Cancel).
+        A typed or spoken reply also answers the question on screen.
+        DISMISSED if the user tapped Cancel, None if the chat cancelled
+        (/stop) or the turn gave up waiting."""
         answers = {}
         for q in questions:
             token = uuid.uuid4().hex[:16]
@@ -312,6 +313,9 @@ class TgIO(TelegramIO):
             if answer is None:
                 await self._close_question(item, "(cancelled)")
                 return None
+            if answer == DISMISSED:
+                await self._close_question(item, "✖️ Cancelled")
+                return DISMISSED
             await self._close_question(item, f"→ {answer}")
             answers[q.get("question", "")] = answer
         return answers
@@ -377,6 +381,7 @@ class Question:
         if self.multi:
             last.append(InlineKeyboardButton("✅ Done", callback_data=f"q|{token}|d"))
         rows.append(last)
+        rows.append([InlineKeyboardButton("✖️ Cancel", callback_data=f"q|{token}|c")])
         return InlineKeyboardMarkup(rows)
 
 
@@ -1177,7 +1182,9 @@ async def on_question_button(update: Update, context):
         except Exception:
             pass
         return
-    if choice == "d":
+    if choice == "c":
+        item.fut.set_result(DISMISSED)
+    elif choice == "d":
         if not item.picked:
             await query.answer("Pick at least one option first.")
             return
