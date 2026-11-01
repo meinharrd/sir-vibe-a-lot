@@ -657,7 +657,8 @@ class ChatSession:
             key = q.get("question", "")
             labels = {o.get("label", "") for o in q.get("options") or []}
             ans = answers.get(key)
-            if ans and not set(ans.split(", ")) <= labels:
+            picked = set(ans.split(", ")) if q.get("multiSelect") else {ans}
+            if ans and not picked <= labels:
                 answers[key] = (
                     f"{ans} [typed by the user instead of picking an option; "
                     "if it is a question or a request, answer it in a visible "
