@@ -521,6 +521,10 @@ class ChatSession:
         # (see _ask_questions).
         self._ask_mark: int | None = 0
         self._bare_question_nudged = False
+        # Whether visible text has been sent since the last tool call. A
+        # lead-in ("Here are the issues:") followed by a tool call and then
+        # the buttons leaves the promised content unsent.
+        self._text_after_tool = False
         self._turn_started: float = 0.0
         # Set when the current turn ends in a usage-limit notice; the worker
         # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
@@ -618,6 +622,17 @@ class ChatSession:
         # the reasoning stays in Claude's hidden thinking. Same right after
         # a typed answer: Claude tends to answer it only in its thinking and
         # re-ask. Turn it back once.
+        if (self._ask_mark is not None and not self._bare_question_nudged
+                and len(self._collected) > self._ask_mark
+                and not self._text_after_tool):
+            self._bare_question_nudged = True
+            return PermissionResultDeny(
+                message="Your last visible text came before your latest tool "
+                        "calls, so their results (whatever that text "
+                        "announced) were never shown: your thinking and tool "
+                        "output are not visible to the user. First write the "
+                        "reply in text, then call AskUserQuestion again if "
+                        "still needed.")
         if (self._ask_mark is not None and len(self._collected) <= self._ask_mark
                 and not self._bare_question_nudged):
             self._bare_question_nudged = True
@@ -1093,10 +1108,12 @@ class ChatSession:
                     if block.text.strip() == SYNTHETIC_REPLY:
                         continue  # CLI transcript repair, not a reply
                     self._collected.append(block.text)
+                    self._text_after_tool = True
                     await self.io.send_text(self.chat_id, block.text)
                 elif isinstance(block, ToolUseBlock):
                     if block.name == "AskUserQuestion":
                         continue  # the question message itself shows it
+                    self._text_after_tool = False
                     from formatting import tool_summary
                     await self.io.status_update(
                         self.chat_id,
@@ -1156,6 +1173,7 @@ class ChatSession:
             self._collected = []
             self._ask_mark = 0
             self._bare_question_nudged = False
+            self._text_after_tool = False
             self._turn_started = 0.0
             fut = self._turn_done
             if fut is not None and not fut.done():
