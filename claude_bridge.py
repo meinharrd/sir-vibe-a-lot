@@ -467,6 +467,9 @@ class TelegramIO:
 # ask_questions() result when the user taps a question's Cancel button.
 DISMISSED = "dismissed"
 
+# How often a question with no visible reply before it is turned back.
+MAX_BARE_NUDGES = 3
+
 RESTART_NOTE = (
     "[The bot process was restarted while this message was being worked on. "
     "The session transcript was resumed, so if you had already started, "
@@ -517,10 +520,10 @@ class ChatSession:
         self._collected: list[str] = []
         # AskUserQuestion needs new visible text first while len(_collected)
         # is still at this mark (None: no need): 0 at turn start, and the
-        # count at the time of a typed answer. Turned back once per mark
-        # (see _ask_questions).
+        # count at the time of a typed answer. Turned back up to
+        # MAX_BARE_NUDGES times per mark (see _ask_questions).
         self._ask_mark: int | None = 0
-        self._bare_question_nudged = False
+        self._bare_question_nudges = 0
         # Whether visible text has been sent since the last tool call. A
         # lead-in ("Here are the issues:") followed by a tool call and then
         # the buttons leaves the promised content unsent.
@@ -621,27 +624,31 @@ class ChatSession:
         # why they're asked (and skip any question they had asked), since
         # the reasoning stays in Claude's hidden thinking. Same right after
         # a typed answer: Claude tends to answer it only in its thinking and
-        # re-ask. Turn it back once.
-        if (self._ask_mark is not None and not self._bare_question_nudged
-                and len(self._collected) > self._ask_mark
+        # re-ask. Turn it back a few times: after one nudge Claude often
+        # writes the answer into its thinking again and re-asks.
+        nudge = (self._ask_mark is not None
+                 and self._bare_question_nudges < MAX_BARE_NUDGES)
+        again = ("Again, nothing was shown: you wrote the reply in your "
+                 "thinking, which the user cannot see. Write it as a normal "
+                 "text response this time. " if self._bare_question_nudges else "")
+        if (nudge and len(self._collected) > self._ask_mark
                 and not self._text_after_tool):
-            self._bare_question_nudged = True
+            self._bare_question_nudges += 1
             return PermissionResultDeny(
-                message="Your last visible text came before your latest tool "
+                message=again + "Your last visible text came before your latest tool "
                         "calls, so their results (whatever that text "
                         "announced) were never shown: your thinking and tool "
                         "output are not visible to the user. First write the "
                         "reply in text, then call AskUserQuestion again if "
                         "still needed.")
-        if (self._ask_mark is not None and len(self._collected) <= self._ask_mark
-                and not self._bare_question_nudged):
-            self._bare_question_nudged = True
+        if nudge and len(self._collected) <= self._ask_mark:
+            self._bare_question_nudges += 1
             what = ("anything the user asked, and say what you found and why "
                     "you are asking" if self._ask_mark == 0 else
                     "what the user typed in reply to your last question; "
                     "they asked it and expect to read your answer")
             return PermissionResultDeny(
-                message="Nothing visible has been sent since "
+                message=again + "Nothing visible has been sent since "
                         + ("this turn started" if self._ask_mark == 0
                            else "the user's typed answer")
                         + ": your thinking is not shown to the user. First "
@@ -680,7 +687,7 @@ class ChatSession:
                     "reply before asking again, since your thinking is not "
                     "shown to the user]")
                 self._ask_mark = len(self._collected)
-                self._bare_question_nudged = False
+                self._bare_question_nudges = 0
         return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
     # ---------- client lifecycle ----------
@@ -1172,7 +1179,7 @@ class ChatSession:
             text = "\n\n".join(self._collected)
             self._collected = []
             self._ask_mark = 0
-            self._bare_question_nudged = False
+            self._bare_question_nudges = 0
             self._text_after_tool = False
             self._turn_started = 0.0
             fut = self._turn_done
