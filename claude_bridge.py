@@ -628,14 +628,6 @@ class ChatSession:
         # writes the answer into its thinking again and re-asks.
         nudge = (self._ask_mark is not None
                  and self._bare_question_nudges < MAX_BARE_NUDGES)
-        # The permission request can overtake the text Claude wrote just
-        # before the question (the receiver may still be delivering it), so
-        # give that text a moment to land before calling the question bare.
-        for _ in range(15):
-            if not nudge or (len(self._collected) > self._ask_mark
-                             and self._text_after_tool):
-                break
-            await asyncio.sleep(0.1)
         again = ("Again, nothing was shown: you wrote the reply in your "
                  "thinking, which the user cannot see. Write it as a normal "
                  "text response this time. " if self._bare_question_nudges else "")
