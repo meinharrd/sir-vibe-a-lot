@@ -469,6 +469,12 @@ DISMISSED = "dismissed"
 
 # How often a question with no visible reply before it is turned back.
 MAX_BARE_NUDGES = 3
+# How a turned-back question ends: Claude tends to write the reply, list the
+# options in prose and stop, so the user gets no buttons.
+ASK_AGAIN = (" call AskUserQuestion again, in the same response, with the "
+             "same question. The user answers with the buttons: do not list "
+             "the options in your text instead, and do not end your turn "
+             "before asking.")
 
 RESTART_NOTE = (
     "[The bot process was restarted while this message was being worked on. "
@@ -639,8 +645,7 @@ class ChatSession:
                         "calls, so their results (whatever that text "
                         "announced) were never shown: your thinking and tool "
                         "output are not visible to the user. First write the "
-                        "reply in text, then call AskUserQuestion again if "
-                        "still needed.")
+                        "reply in text, then" + ASK_AGAIN)
         if nudge and len(self._collected) <= self._ask_mark:
             self._bare_question_nudges += 1
             what = ("anything the user asked, and say what you found and why "
@@ -652,8 +657,7 @@ class ChatSession:
                         + ("this turn started" if self._ask_mark == 0
                            else "the user's typed answer")
                         + ": your thinking is not shown to the user. First "
-                        f"reply in text (answer {what}), then call "
-                        "AskUserQuestion again if still needed.")
+                        f"reply in text (answer {what}), then" + ASK_AGAIN)
         try:
             answers = await asyncio.wait_for(
                 self.io.ask_questions(self.chat_id, questions),
