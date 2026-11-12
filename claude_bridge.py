@@ -33,6 +33,7 @@ from claude_agent_sdk import (
 )
 
 import config
+import issues
 import router
 
 log = logging.getLogger(__name__)
@@ -467,6 +468,14 @@ class TelegramIO:
 # ask_questions() result when the user taps a question's Cancel button.
 DISMISSED = "dismissed"
 
+# Sent when a turn the user started ends with nothing visible after its last
+# step: the answer is usually sitting in Claude's thinking.
+SILENT_NUDGE = (
+    "[Bot: your turn ended without anything visible to the user after your "
+    "last step. Your thinking and tool output are not shown, so the user saw "
+    "no answer. Reply now in plain text: what you did, what you found, and "
+    "anything they asked.]")
+
 # How often a question with no visible reply before it is turned back.
 MAX_BARE_NUDGES = 3
 # How a turned-back question ends: Claude tends to write the reply, list the
@@ -534,6 +543,10 @@ class ChatSession:
         # lead-in ("Here are the issues:") followed by a tool call and then
         # the buttons leaves the promised content unsent.
         self._text_after_tool = False
+        # Whether something visible (text, file, photo, question) has reached
+        # the user since the last tool call of the current prompt's run; a
+        # run ending without it gets SILENT_NUDGE (see _worker).
+        self._shown_after_tool = False
         self._turn_started: float = 0.0
         # Set when the current turn ends in a usage-limit notice; the worker
         # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
@@ -560,6 +573,7 @@ class ChatSession:
                                      "text": f"Error: file not found: {p}"}],
                         "isError": True}
             await io.send_photo(chat_id, str(p), args.get("caption", ""))
+            self._shown_after_tool = True
             return {"content": [{"type": "text", "text": f"Photo {p} sent."}]}
 
         @tool("send_file", "Send any file (document) to the user on Telegram.",
@@ -571,6 +585,7 @@ class ChatSession:
                                      "text": f"Error: file not found: {p}"}],
                         "isError": True}
             await io.send_file(chat_id, str(p), args.get("caption", ""))
+            self._shown_after_tool = True
             return {"content": [{"type": "text", "text": f"File {p} sent."}]}
 
         @tool("send_voice",
@@ -579,6 +594,7 @@ class ChatSession:
               {"text": str})
         async def send_voice(args: dict[str, Any]):
             await io.send_voice_text(chat_id, args["text"])
+            self._shown_after_tool = True
             return {"content": [{"type": "text", "text": "Voice note sent."}]}
 
         @tool("send_copyable",
@@ -589,6 +605,7 @@ class ChatSession:
         async def send_copyable(args: dict[str, Any]):
             text = args["text"].strip().replace("```", "` ` `")
             await io.send_text(chat_id, f"```\n{text}\n```")
+            self._shown_after_tool = True
             return {"content": [{"type": "text", "text": "Copyable message sent."}]}
 
         return create_sdk_mcp_server(
@@ -640,6 +657,7 @@ class ChatSession:
         if (nudge and len(self._collected) > self._ask_mark
                 and not self._text_after_tool):
             self._bare_question_nudges += 1
+            issues.record("question_bare", self.chat_id, "text before tools")
             return PermissionResultDeny(
                 message=again + "Your last visible text came before your latest tool "
                         "calls, so their results (whatever that text "
@@ -648,6 +666,7 @@ class ChatSession:
                         "reply in text, then" + ASK_AGAIN)
         if nudge and len(self._collected) <= self._ask_mark:
             self._bare_question_nudges += 1
+            issues.record("question_bare", self.chat_id, "no text")
             what = ("anything the user asked, and say what you found and why "
                     "you are asking" if self._ask_mark == 0 else
                     "what the user typed in reply to your last question; "
@@ -658,6 +677,7 @@ class ChatSession:
                            else "the user's typed answer")
                         + ": your thinking is not shown to the user. First "
                         f"reply in text (answer {what}), then" + ASK_AGAIN)
+        self._shown_after_tool = True
         try:
             answers = await asyncio.wait_for(
                 self.io.ask_questions(self.chat_id, questions),
@@ -949,7 +969,10 @@ class ChatSession:
             self._save_queue()
             shutting_down = False
             try:
+                self._shown_after_tool = False
                 text = await self._run(prompt)
+                if not self._hit_limit and not self._shown_after_tool:
+                    text = await self._unsilence(text)
                 if self._hit_limit:
                     self._reclaim_injected()
                     self.queue.extendleft(reversed(self._absorbed))
@@ -987,6 +1010,20 @@ class ChatSession:
                 if not shutting_down:
                     self.in_flight = None
                     self._save_queue()
+
+    async def _unsilence(self, text: str) -> str:
+        """The run ended with nothing visible after its last step: ask Claude
+        once to say it in text, and tell the user if it still doesn't."""
+        issues.record("silent", self.chat_id)
+        log.info("chat %s: turn ended silently, nudging", self.chat_id)
+        more = await self._run(SILENT_NUDGE)
+        if not self._hit_limit and not self._shown_after_tool:
+            issues.record("silent_unresolved", self.chat_id)
+            await self.io.send_text(
+                self.chat_id, "⚠️ Claude finished without a visible reply, "
+                "even after being asked for one. Ask again, or send /stop "
+                "and rephrase.", markdown=False)
+        return "\n\n".join(t for t in (text, more) if t)
 
     async def _run(self, prompt):
         await self._ensure_client()
@@ -1120,11 +1157,14 @@ class ChatSession:
                         continue  # CLI transcript repair, not a reply
                     self._collected.append(block.text)
                     self._text_after_tool = True
+                    self._shown_after_tool = True
                     await self.io.send_text(self.chat_id, block.text)
                 elif isinstance(block, ToolUseBlock):
                     if block.name == "AskUserQuestion":
                         continue  # the question message itself shows it
                     self._text_after_tool = False
+                    if not block.name.startswith("mcp__telegram__"):
+                        self._shown_after_tool = False
                     from formatting import tool_summary
                     await self.io.status_update(
                         self.chat_id,
@@ -1176,7 +1216,9 @@ class ChatSession:
                 # result.result — surface it if nothing was streamed.
                 if not self._collected and message.result:
                     await self.io.send_text(self.chat_id, message.result)
+                    self._shown_after_tool = True
             else:
+                self._shown_after_tool = True  # the status line says why
                 await self.io.status_done(
                     self.chat_id,
                     f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")

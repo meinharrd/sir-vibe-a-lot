@@ -31,6 +31,7 @@ from telegram.ext import (
 
 import audio
 import config
+import issues
 import router
 from claude_bridge import (
     DISMISSED, MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
@@ -43,6 +44,7 @@ from login import LoginFlow, LoginError
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger().addHandler(issues.ErrorFileHandler())
 log = logging.getLogger("bot")
 
 HELP = """<b>Sir Vibe-a-lot</b> — Claude Code on Telegram
@@ -1253,7 +1255,15 @@ async def post_init(app: Application):
     continued = await manager.continue_after_restart()
     if continued:
         log.info("sent continue prompts after restart to: %s", continued)
+    asyncio.get_running_loop().create_task(
+        issues.scan_loop(app.bot, _chat_label))
     log.info("Bot ready.")
+
+
+def _chat_label(chat_id: int | None) -> str:
+    """How the health report names a chat: its working folder and id."""
+    st = manager.states.get(chat_id) if chat_id is not None else None
+    return f"{Path(st.cwd).name or st.cwd} ({chat_id})" if st else str(chat_id)
 
 
 def main():
