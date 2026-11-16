@@ -1255,9 +1255,36 @@ async def post_init(app: Application):
     continued = await manager.continue_after_restart()
     if continued:
         log.info("sent continue prompts after restart to: %s", continued)
-    asyncio.get_running_loop().create_task(
+    global _health_task
+    _health_task = asyncio.get_running_loop().create_task(
         issues.scan_loop(app.bot, _chat_label))
     log.info("Bot ready.")
+
+
+_health_task: asyncio.Task | None = None
+
+
+async def post_shutdown(app: Application):
+    # Left pending, the loop is destroyed with the event loop and logs an
+    # ERROR that the next health report would flag.
+    if _health_task is not None:
+        _health_task.cancel()
+        try:
+            await _health_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def on_error(update, context):
+    """Telegram's API returns 502/timeouts now and then (nightly around
+    02:13 on hel1); polling retries by itself, so that is a warning, not an
+    error for the health report. BadRequest subclasses NetworkError but is a
+    real fault."""
+    err = context.error
+    if isinstance(err, NetworkError) and not isinstance(err, BadRequest):
+        log.warning("Telegram network error (retried): %s", err)
+        return
+    log.error("Unhandled error in update handler", exc_info=err)
 
 
 def _chat_label(chat_id: int | None) -> str:
@@ -1272,9 +1299,11 @@ def main():
             "TELEGRAM_BOT_TOKEN is not set.\n"
             "Create a bot with @BotFather, then put the token in "
             f"{config.PROJECT_DIR}/.env")
-    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
+    app = (Application.builder().token(config.BOT_TOKEN)
+           .post_init(post_init).post_shutdown(post_shutdown).build())
 
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
+    app.add_error_handler(on_error)
 
     app.add_handler(CallbackQueryHandler(on_perm_button, pattern=r"^p\|"))
     app.add_handler(CallbackQueryHandler(on_question_button, pattern=r"^q\|"))
