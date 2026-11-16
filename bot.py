@@ -32,6 +32,7 @@ from telegram.ext import (
 import audio
 import config
 import issues
+import poller_watch
 import router
 from claude_bridge import (
     DISMISSED, MODEL_ALIASES, USAGE_LIMIT, ChatManager, TelegramIO, cli_version,
@@ -1255,22 +1256,22 @@ async def post_init(app: Application):
     continued = await manager.continue_after_restart()
     if continued:
         log.info("sent continue prompts after restart to: %s", continued)
-    global _health_task
-    _health_task = asyncio.get_running_loop().create_task(
-        issues.scan_loop(app.bot, _chat_label))
+    loop = asyncio.get_running_loop()
+    _bg_tasks.append(loop.create_task(issues.scan_loop(app.bot, _chat_label)))
+    _bg_tasks.append(loop.create_task(poller_watch.watch.loop(app.bot)))
     log.info("Bot ready.")
 
 
-_health_task: asyncio.Task | None = None
+_bg_tasks: list[asyncio.Task] = []
 
 
 async def post_shutdown(app: Application):
-    # Left pending, the loop is destroyed with the event loop and logs an
+    # Left pending, these loops are destroyed with the event loop and log an
     # ERROR that the next health report would flag.
-    if _health_task is not None:
-        _health_task.cancel()
+    for task in _bg_tasks:
+        task.cancel()
         try:
-            await _health_task
+            await task
         except asyncio.CancelledError:
             pass
 
@@ -1281,6 +1282,9 @@ async def on_error(update, context):
     error for the health report. BadRequest subclasses NetworkError but is a
     real fault."""
     err = context.error
+    if poller_watch.watch.is_conflict(err):
+        poller_watch.watch.hit(context.bot, err)
+        return
     if isinstance(err, NetworkError) and not isinstance(err, BadRequest):
         log.warning("Telegram network error (retried): %s", err)
         return
