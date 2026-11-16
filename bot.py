@@ -395,9 +395,24 @@ manager = ChatManager(io)
 
 # ---------------- handlers ----------------
 
+# Messages sent while the bot was down are processed after it starts (no
+# drop_pending_updates), except these commands: a queued /restartbot would
+# restart it in a loop, a queued /stop would kill the work it just resumed.
+STALE_COMMANDS = ("/restartbot", "/stop")
+STARTED_AT = time.time()
+
+
 async def gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user is not None and user.id in config.OWNER_IDS:
+        msg = update.effective_message
+        cmd = (msg.text or "").split("@")[0].split()[0] if msg and msg.text else ""
+        if (cmd in STALE_COMMANDS and msg.date is not None
+                and msg.date.timestamp() < STARTED_AT):
+            log.info("chat %s: skipping %s sent before startup", msg.chat_id, cmd)
+            await msg.reply_text(f"Skipped {cmd}: it was sent while the bot "
+                                 "was down. Send it again if you still want it.")
+            raise ApplicationHandlerStop
         return
     # Added to a group by a non-owner: leave immediately.
     mcm = update.my_chat_member
@@ -1352,9 +1367,9 @@ def main():
             url_path=urlparse(config.WEBHOOK_URL).path.lstrip("/"),
             webhook_url=config.WEBHOOK_URL,
             secret_token=config.WEBHOOK_SECRET,
-            allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
     else:
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
 
 
 if __name__ == "__main__":
