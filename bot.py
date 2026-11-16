@@ -8,6 +8,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telegram import (
     ForceReply,
@@ -1303,6 +1304,11 @@ def main():
             "TELEGRAM_BOT_TOKEN is not set.\n"
             "Create a bot with @BotFather, then put the token in "
             f"{config.PROJECT_DIR}/.env")
+    if config.WEBHOOK_URL and not (config.WEBHOOK_URL.startswith("https://")
+                                   and config.WEBHOOK_SECRET):
+        raise SystemExit(
+            "WEBHOOK_URL must be an https:// URL and needs WEBHOOK_SECRET "
+            f"set too ({config.PROJECT_DIR}/.env); leave both empty to poll.")
     app = (Application.builder().token(config.BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
 
@@ -1337,7 +1343,18 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    if config.WEBHOOK_URL:
+        # The path is a secret too; log the host only.
+        log.info("Receiving updates by webhook at https://%s/…",
+                 urlparse(config.WEBHOOK_URL).netloc)
+        app.run_webhook(
+            listen="127.0.0.1", port=config.WEBHOOK_PORT,
+            url_path=urlparse(config.WEBHOOK_URL).path.lstrip("/"),
+            webhook_url=config.WEBHOOK_URL,
+            secret_token=config.WEBHOOK_SECRET,
+            allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    else:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

@@ -99,6 +99,9 @@ The first voice note you send downloads the Whisper model (~500 MB, one time).
 | `SERVICE_NAME` | `sir-vibe-a-lot` | systemd unit name (for self-restart) |
 | `LIMIT_RETRY_INTERVAL_S` | `300` | how often queued messages are retried while a Claude usage limit is active (the limit lifts early when usage is topped up) |
 | `ALAN_ACCOUNTS` | `~/alan/accounts.py` | account registry used for routing (see below); routing is off when the file is missing |
+| `WEBHOOK_URL` | — | public https URL to receive updates by webhook instead of polling (see Security notes) |
+| `WEBHOOK_SECRET` | — | secret Telegram sends with every webhook request (required with `WEBHOOK_URL`) |
+| `WEBHOOK_PORT` | `8350` | local port the webhook listens on (127.0.0.1) |
 
 ## Multiple subscriptions
 
@@ -126,6 +129,14 @@ SDK this bot speaks.
   `bypassPermissions`: anyone controlling an owner Telegram account can then
   run arbitrary commands on the host. Switch a chat to `/mode ask` to confirm
   every non-read-only tool call with buttons instead.
+- Give every host its own bot token. Two processes polling one token split
+  its updates between them; the bot DMs the owners when that starts and ends
+  (`poller_watch.py`). With `WEBHOOK_URL` set, Telegram refuses `getUpdates`
+  from anyone, so a leaked token can't read incoming messages; the bot checks
+  its webhook every 30 s and sets it back (and DMs the owners) if someone
+  deletes or replaces it. Put the webhook behind an https reverse proxy with a
+  random path, e.g. in Caddy: `handle /tg/<random> { reverse_proxy 127.0.0.1:8350 }`.
+  A leaked token can still send as the bot: revoke it in @BotFather.
 - Sessions are scoped to the working directory; state lives in
   `data/state.json`, received media under `data/media/` (both git-ignored,
   as is `.env`).

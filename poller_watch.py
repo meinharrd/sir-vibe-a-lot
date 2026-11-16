@@ -10,11 +10,17 @@ reported too.
 A rejected token (revoked in BotFather) makes python-telegram-bot abort
 polling for good while the process keeps running. Nothing can be sent with a
 rejected token, so that gets one clear CRITICAL log line instead of a DM.
+
+In webhook mode (WEBHOOK_URL set) Telegram refuses getUpdates from anyone, so
+the only way in for a leaked token is to delete or replace our webhook. The
+loop checks getWebhookInfo every CHECK_INTERVAL_S, puts our webhook back and
+tells the owners.
 """
 import asyncio
 import logging
 import time
 
+from telegram import Update
 from telegram.error import Conflict, InvalidToken
 
 import config
@@ -23,6 +29,7 @@ log = logging.getLogger("poller_watch")
 
 QUIET_S = 120        # no Conflict for this long: the other poller is gone
 CHECK_INTERVAL_S = 30
+HOOK_DM_EVERY_S = 600  # someone fighting over the webhook: DM at most this often
 
 
 def _bot_id() -> str:
@@ -67,6 +74,8 @@ class PollerWatch:
         self.since: float | None = None
         self.last = 0.0
         self.count = 0
+        self._hook_dm_at = 0.0
+        self._hook_err: tuple | None = None
 
     def is_conflict(self, err) -> bool:
         return isinstance(err, Conflict)
@@ -107,12 +116,43 @@ class PollerWatch:
             f"{_clock(since)} to {_clock(self.last)} (about {mins} min, "
             f"{count} conflicts). This bot receives all updates again."))
 
+    async def check_webhook(self, bot) -> None:
+        """Webhook mode: anyone else with the token can only get updates by
+        deleting or replacing our webhook first. Put it back right away (their
+        getUpdates then fails again) and tell the owners."""
+        info = await bot.get_webhook_info()
+        if info.url != config.WEBHOOK_URL:
+            other = info.url or "none (deleted, so the other side can poll)"
+            # Don't log or DM our own URL: its path is a secret.
+            log.error("Webhook of bot %s was changed by someone else to %s; "
+                      "setting ours back", _bot_id(), other)
+            await bot.set_webhook(config.WEBHOOK_URL,
+                                  secret_token=config.WEBHOOK_SECRET,
+                                  allowed_updates=Update.ALL_TYPES)
+            now = time.time()
+            if now - self._hook_dm_at > HOOK_DM_EVERY_S:
+                self._hook_dm_at = now
+                await _dm_owners(bot, (
+                    f"Someone else with this bot's token (id {_bot_id()}) "
+                    f"changed its webhook at {_clock(now)}. It was set to: "
+                    f"{other}. This bot set its own webhook back, so they "
+                    f"receive nothing new, but the token is leaked: revoke it "
+                    f"in @BotFather and put the new one in .env."))
+            return
+        err = (info.last_error_date, info.last_error_message)
+        if info.last_error_message and err != self._hook_err:
+            self._hook_err = err
+            log.warning("Telegram couldn't deliver to the webhook: %s (at %s)",
+                        info.last_error_message, info.last_error_date)
+
     async def loop(self, bot) -> None:
         while True:
             await asyncio.sleep(CHECK_INTERVAL_S)
             try:
                 if self.since is not None and time.time() - self.last > QUIET_S:
                     await self._ended(bot)
+                if config.WEBHOOK_URL:
+                    await self.check_webhook(bot)
             except Exception as e:
                 log.warning("poller watch failed: %s", e)
 

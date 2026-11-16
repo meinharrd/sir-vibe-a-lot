@@ -9,6 +9,16 @@ load_dotenv(PROJECT_DIR / ".env")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
+# Optional webhook instead of polling. While a webhook is set, Telegram
+# refuses getUpdates from anyone, so a leaked token can't be used to read
+# the bot's incoming messages. WEBHOOK_URL is the public https URL (its path
+# is served locally on 127.0.0.1:WEBHOOK_PORT behind a reverse proxy);
+# WEBHOOK_SECRET is checked on every request (1-256 chars of A-Z a-z 0-9 _ -).
+# Unset: the bot polls.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8350"))
+
 # Comma-separated Telegram user IDs allowed to talk to the bot.
 OWNER_IDS = {
     int(x) for x in os.environ.get("OWNER_IDS", "").replace(" ", "").split(",") if x
