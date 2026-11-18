@@ -320,16 +320,24 @@ class TgIO(TelegramIO):
             if answer == DISMISSED:
                 await self._close_question(item, "✖️ Cancelled")
                 return DISMISSED
-            await self._close_question(item, f"→ {answer.removeprefix('[voice] ')}")
+            await self._close_question(
+                item, f"→ {answer.removeprefix('[voice] ')}", answer)
             answers[q.get("question", "")] = answer
         return answers
 
-    async def _close_question(self, item: "Question", note: str):
+    async def _close_question(self, item: "Question", note: str,
+                              answer: str | None = None):
+        """Replace the buttons with the outcome. The options stay listed
+        (the picked ones ticked) so what else was offered can be seen later."""
         if item.msg_id is None:
             return
+        chosen = set()
+        if answer is not None:
+            chosen = set(answer.split(", ")) if item.multi else {answer}
         try:
             await self.app.bot.edit_message_text(
-                item.render(options=False) + f"\n\n<b>{html.escape(note)}</b>",
+                item.render(closed=True, chosen=chosen)
+                + f"\n\n<b>{html.escape(note)}</b>",
                 chat_id=item.chat_id, message_id=item.msg_id, parse_mode="HTML")
         except Exception:
             pass
@@ -360,18 +368,19 @@ class Question:
         self.picked: set[int] = set()
         self.msg_id: int | None = None
 
-    def render(self, options: bool = True) -> str:
+    def render(self, closed: bool = False, chosen: set[str] = frozenset()) -> str:
         head = self.q.get("header")
         text = "❓ " + (f"<b>{html.escape(head)}</b>\n" if head else "")
         text += html.escape(self.q.get("question", ""))
-        if options:
-            lines = []
-            for o in self.q.get("options") or []:
-                d = o.get("description", "")
-                lines.append(f"• <b>{html.escape(o.get('label', ''))}</b>"
-                             + (f" — {html.escape(d)}" if d and d != o.get("label") else ""))
-            if lines:
-                text += "\n\n" + "\n".join(lines)
+        lines = []
+        for o in self.q.get("options") or []:
+            label, d = o.get("label", ""), o.get("description", "")
+            lines.append(("✅" if label in chosen else "•")
+                         + f" <b>{html.escape(label)}</b>"
+                         + (f" — {html.escape(d)}" if d and d != label else ""))
+        if lines:
+            text += "\n\n" + "\n".join(lines)
+        if not closed:
             text += ("\n\n<i>Tap to select, then Done — or type your own answer.</i>"
                      if self.multi else "\n\n<i>Tap one — or type your own answer.</i>")
         return text
@@ -1200,7 +1209,7 @@ async def on_question_button(update: Update, context):
         await query.answer("Type your answer as a message.")
         try:
             await query.edit_message_text(
-                item.render(options=False) + "\n\n<i>✏️ Type your answer…</i>",
+                item.render(closed=True) + "\n\n<i>✏️ Type your answer…</i>",
                 parse_mode="HTML")
         except Exception:
             pass
