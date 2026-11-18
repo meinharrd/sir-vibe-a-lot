@@ -1131,6 +1131,12 @@ async def on_voice(update: Update, context):
         return
     await msg.reply_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode="HTML",
                          do_quote=False)
+    # Bots can't mark a voice note as listened to, so a reaction shows it
+    # was transcribed instead.
+    try:
+        await msg.set_reaction("✍")
+    except Exception:
+        pass  # reactions turned off in this chat
     # Tagged so Claude reads it as a transcript (see SYSTEM_APPEND).
     if io.answer_typed(update.effective_chat.id, f"[voice] {text}"):
         return
