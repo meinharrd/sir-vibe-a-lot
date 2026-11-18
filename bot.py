@@ -320,7 +320,7 @@ class TgIO(TelegramIO):
             if answer == DISMISSED:
                 await self._close_question(item, "✖️ Cancelled")
                 return DISMISSED
-            await self._close_question(item, f"→ {answer}")
+            await self._close_question(item, f"→ {answer.removeprefix('[voice] ')}")
             answers[q.get("question", "")] = answer
         return answers
 
@@ -1108,18 +1108,22 @@ async def on_voice(update: Update, context):
     tg_file = await media.get_file()
     await tg_file.download_to_drive(path)
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
+    # Plain messages, not replies: a reply to the user's own voice note
+    # notifies them as a mention.
     try:
         text = await audio.transcribe(str(path))
     except Exception as e:
-        await msg.reply_text(f"⚠️ Could not transcribe voice note: {e}")
+        await msg.reply_text(f"⚠️ Could not transcribe voice note: {e}", do_quote=False)
         return
     if not text:
-        await msg.reply_text("🎤 (couldn't hear anything in that)")
+        await msg.reply_text("🎤 (couldn't hear anything in that)", do_quote=False)
         return
-    await msg.reply_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode="HTML")
-    if io.answer_typed(update.effective_chat.id, text):
+    await msg.reply_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode="HTML",
+                         do_quote=False)
+    # Tagged so Claude reads it as a transcript (see SYSTEM_APPEND).
+    if io.answer_typed(update.effective_chat.id, f"[voice] {text}"):
         return
-    await _ack(update, *_submit(update, text, was_voice=True))
+    await _ack(update, *_submit(update, f"[voice] {text}", was_voice=True))
 
 
 async def on_photo(update: Update, context):
