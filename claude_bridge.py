@@ -553,6 +553,13 @@ class ChatSession:
         # the user since the last tool call of the current prompt's run; a
         # run ending without it gets SILENT_NUDGE (see _worker).
         self._shown_after_tool = False
+        # AskUserQuestion tool_use ids the receiver has processed, and an
+        # event set whenever one is added. The permission request runs in
+        # its own task and can overtake the messages before it (the receiver
+        # may still be sending earlier text to Telegram), so _ask_questions
+        # waits for its own block before judging what was shown.
+        self._seen_questions: set[str] = set()
+        self._question_seen = asyncio.Event()
         self._turn_started: float = 0.0
         # Set when the current turn ends in a usage-limit notice; the worker
         # re-queues the prompt and waits on USAGE_LIMIT before retrying, so
@@ -623,6 +630,7 @@ class ChatSession:
 
     async def _can_use_tool(self, tool_name: str, tool_input: dict, context):
         if tool_name == "AskUserQuestion":
+            await self._await_question_block(getattr(context, "tool_use_id", None))
             return await self._ask_questions(tool_input)
         if (self.state.mode != "ask" or tool_name in config.SAFE_TOOLS
                 or tool_name in self.state.always_allowed):
@@ -644,6 +652,25 @@ class ChatSession:
         if answer == "allow":
             return PermissionResultAllow()
         return PermissionResultDeny(message="The user denied this tool call.")
+
+    async def _await_question_block(self, tool_use_id: str | None):
+        """Wait (briefly) until the receiver has processed this question's
+        tool_use block, so the text Claude wrote before it is counted."""
+        if not tool_use_id:
+            return
+        deadline = time.monotonic() + 5
+        while tool_use_id not in self._seen_questions:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                log.warning("chat %s: question %s not seen by the receiver "
+                            "within 5s", self.chat_id, tool_use_id)
+                return
+            self._question_seen.clear()
+            try:
+                await asyncio.wait_for(self._question_seen.wait(), left)
+            except asyncio.TimeoutError:
+                pass
+        self._seen_questions.discard(tool_use_id)
 
     async def _ask_questions(self, tool_input: dict):
         """Claude's multiple-choice questions, answered with Telegram buttons.
@@ -1167,6 +1194,8 @@ class ChatSession:
                     await self.io.send_text(self.chat_id, block.text)
                 elif isinstance(block, ToolUseBlock):
                     if block.name == "AskUserQuestion":
+                        self._seen_questions.add(block.id)
+                        self._question_seen.set()
                         continue  # the question message itself shows it
                     self._text_after_tool = False
                     if not block.name.startswith("mcp__telegram__"):
