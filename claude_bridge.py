@@ -484,12 +484,15 @@ SILENT_NUDGE = (
 
 # How often a question with no visible reply before it is turned back.
 MAX_BARE_NUDGES = 3
-# How a turned-back question ends: Claude tends to write the reply, list the
-# options in prose and stop, so the user gets no buttons.
-ASK_AGAIN = (" call AskUserQuestion again, in the same response, with the "
-             "same question. The user answers with the buttons: do not list "
-             "the options in your text instead, and do not end your turn "
-             "before asking.")
+# How a turned-back question ends. Asked to re-call AskUserQuestion after
+# its reply, Claude often listed the options in prose instead (and claimed
+# the buttons "didn't come through"), so the bot keeps the question and
+# shows the buttons itself once the turn ends (see _ask_deferred).
+ASK_AGAIN = (" end your turn. The bot keeps this question and shows its "
+             "buttons to the user right after your reply; their answer comes "
+             "back to you as the next message. So do not call "
+             "AskUserQuestion again for it and do not list the options in "
+             "your text.")
 
 RESTART_NOTE = (
     "[The bot process was restarted while this message was being worked on. "
@@ -544,6 +547,9 @@ class ChatSession:
         # count at the time of a typed answer. Turned back up to
         # MAX_BARE_NUDGES times per mark (see _ask_questions).
         self._ask_mark: int | None = 0
+        # A question turned back for lack of visible text: shown by the bot
+        # once the turn ends, unless Claude asks again itself (ASK_AGAIN).
+        self._deferred_questions: list | None = None
         self._bare_question_nudges = 0
         # Whether visible text has been sent since the last tool call. A
         # lead-in ("Here are the issues:") followed by a tool call and then
@@ -690,6 +696,7 @@ class ChatSession:
         if (nudge and len(self._collected) > self._ask_mark
                 and not self._text_after_tool):
             self._bare_question_nudges += 1
+            self._deferred_questions = questions
             issues.record("question_bare", self.chat_id, "text before tools")
             return PermissionResultDeny(
                 message=again + "Your last visible text came before your latest tool "
@@ -699,6 +706,7 @@ class ChatSession:
                         "reply in text, then" + ASK_AGAIN)
         if nudge and len(self._collected) <= self._ask_mark:
             self._bare_question_nudges += 1
+            self._deferred_questions = questions
             issues.record("question_bare", self.chat_id, "no text")
             what = ("anything the user asked, and say what you found and why "
                     "you are asking" if self._ask_mark == 0 else
@@ -711,6 +719,7 @@ class ChatSession:
                         + ": your thinking is not shown to the user. First "
                         f"reply in text (answer {what}), then" + ASK_AGAIN)
         self._shown_after_tool = True
+        self._deferred_questions = None  # asked again after all
         try:
             answers = await asyncio.wait_for(
                 self.io.ask_questions(self.chat_id, questions),
@@ -746,6 +755,36 @@ class ChatSession:
                 self._ask_mark = len(self._collected)
                 self._bare_question_nudges = 0
         return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+
+    async def _ask_deferred(self, questions: list) -> None:
+        """Show a question that was turned back during the turn, now that
+        the reply is out, and pass the answer on as the next prompt."""
+        try:
+            answers = await asyncio.wait_for(
+                self.io.ask_questions(self.chat_id, questions),
+                timeout=config.QUESTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return
+        except Exception:
+            log.exception("chat %s: deferred question failed", self.chat_id)
+            return
+        if answers == DISMISSED or not answers:
+            return  # Cancel or no answer: the decision just stays open
+        lines = []
+        for q in questions:
+            key = q.get("question", "")
+            labels = {o.get("label", "") for o in q.get("options") or []}
+            ans = answers.get(key)
+            if not ans:
+                continue
+            picked = set(ans.split(", ")) if q.get("multiSelect") else {ans}
+            how = ("picked" if picked <= labels else
+                   "typed instead of picking an option; if it is a question "
+                   "or a request, answer it in a visible reply first")
+            lines.append(f'"{key}" = "{ans}" ({how})')
+        if lines:
+            self.submit("[Answer to the question buttons the bot showed after "
+                        "your last reply]\n" + "\n".join(lines))
 
     # ---------- client lifecycle ----------
 
@@ -1257,6 +1296,10 @@ class ChatSession:
                 await self.io.status_done(
                     self.chat_id,
                     f"⚠️ ended: {message.subtype} ({elapsed:.0f}s){cost}")
+            if self._deferred_questions and not reset_ts:
+                asyncio.get_running_loop().create_task(
+                    self._ask_deferred(self._deferred_questions))
+            self._deferred_questions = None
             text = "\n\n".join(self._collected)
             self._collected = []
             self._ask_mark = 0
