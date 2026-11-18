@@ -334,10 +334,12 @@ class TgIO(TelegramIO):
         chosen = set()
         if answer is not None:
             chosen = set(answer.split(", ")) if item.multi else {answer}
+            if chosen <= set(item.options):
+                note = ""  # the ✅ already shows a tapped answer
         try:
             await self.app.bot.edit_message_text(
                 item.render(closed=True, chosen=chosen)
-                + f"\n\n<b>{html.escape(note)}</b>",
+                + (f"\n\n<b>{html.escape(note)}</b>" if note else ""),
                 chat_id=item.chat_id, message_id=item.msg_id, parse_mode="HTML")
         except Exception:
             pass
