@@ -1261,6 +1261,31 @@ async def on_active_button(update: Update, context):
     await update.callback_query.answer("This session is already active.")
 
 
+# Fields every message has; the rest say what kind of message it is.
+_BASIC_FIELDS = {"message_id", "date", "chat", "from", "from_user",
+                 "message_thread_id", "is_topic_message", "edit_date",
+                 "reply_to_message", "has_protected_content", "sender_chat",
+                 "author_signature", "is_from_offline", "via_bot"}
+
+
+async def on_unhandled(update: Update, context):
+    """A message no handler took (a type the bot doesn't know). Without
+    this it vanished silently and the user waited for a reply that never
+    came (seen 2026-11-20 with a long formatted message)."""
+    msg = update.effective_message
+    if msg is None:
+        return
+    fields = sorted(k for k, v in msg.to_dict().items()
+                    if k not in _BASIC_FIELDS and v not in (None, False, [], {}, ""))
+    log.warning("chat %s: unhandled message with fields %s",
+                msg.chat_id, ", ".join(fields) or "(none)")
+    issues.record("unhandled_message", msg.chat_id, ", ".join(fields))
+    await msg.reply_text(
+        "⚠️ I received this message but can't read this kind of message "
+        f"({', '.join(fields) or 'unknown type'}), so it did not reach "
+        "Claude. Please send it again as plain text or as a file.")
+
+
 async def post_init(app: Application):
     io.app = app
     # Warm the alias table off the event loop so /status and /model never block.
@@ -1372,6 +1397,9 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    # Last in the group, so it only sees what nothing above handled.
+    app.add_handler(MessageHandler(
+        filters.ALL & ~filters.StatusUpdate.ALL, on_unhandled))
 
     if config.WEBHOOK_URL:
         # The path is a secret too; log the host only.
