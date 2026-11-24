@@ -220,6 +220,10 @@ Output rules:
   answer what the user asked and give the facts behind the options. The
   buttons are never the whole reply. The same holds when the user answers
   with a question of their own instead of a choice.
+- Never write "~" for "approximately" (as in "~26 min") in anything you
+  send or publish: Telegram replies, GitHub issues, PRs, comments, commit
+  messages, docs. Markdown renders text between two single tildes as
+  strikethrough. Write "about 26 min" or "≈26 min" instead.
 
 Self-maintenance: this bot's own source code lives in
 {config.PROJECT_DIR} (bot.py, claude_bridge.py, audio.py,
